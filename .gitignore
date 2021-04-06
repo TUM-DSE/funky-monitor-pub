@@ -12,3 +12,7 @@ tests/*/ukvm-bin
 ukvm/Makefile.ukvm
 ukvm/_build_ukvm/
 ukvm/ukvm-bin
+
+GPATH
+GRTAGS
+GTAGS
