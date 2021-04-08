@@ -42,14 +42,14 @@ static void hypercall_getfpga(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     struct ukvm_fpga *fpga =
         UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpga));
 
-    int ret=11;
+    int ret=1;
     // ret = read(netfd, UKVM_CHECKED_GPA_P(hv, rd->data, rd->len), rd->len);
     // if ((ret == 0) ||
     //     (ret == -1 && errno == EAGAIN)) {
     //     rd->ret = -1;
     //     return;
     // }
-    assert(ret > 0);
+
     fpga->len = ret;
     fpga->ret = 0;
 }
@@ -71,7 +71,7 @@ static int setup(struct ukvm_hv *hv)
     // if (diskfd == -1)
     //     err(1, "Could not open disk: %s", diskfile);
     
-    printf("fpga setup is called\n");
+    printf("fpga setup is called.\n");
 
     assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_GETFPGA,
                 hypercall_getfpga) == 0);
