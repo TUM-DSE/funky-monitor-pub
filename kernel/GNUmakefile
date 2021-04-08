@@ -42,6 +42,7 @@ ukvm/platform_lifecycle.o \
 ukvm/yield.o \
 ukvm/tscclock.o \
 ukvm/console.o \
+ukvm/fpga.o \
 ukvm/net.o \
 ukvm/block.o \
 $(COMMON_COBJS)

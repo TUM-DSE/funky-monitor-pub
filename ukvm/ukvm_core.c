@@ -57,6 +57,9 @@ struct ukvm_module *ukvm_core_modules[] = {
 #ifdef UKVM_MODULE_GDB
     &ukvm_module_gdb,
 #endif
+#ifdef UKVM_MODULE_FPGA
+    &ukvm_module_fpga,
+#endif
     NULL,
 };
 #define NUM_MODULES ((sizeof ukvm_core_modules / sizeof (struct ukvm_module *)) - 1)

@@ -277,4 +277,15 @@ solo5_result_t solo5_block_write(solo5_off_t offset, const uint8_t *buf,
  */
 solo5_result_t solo5_block_read(solo5_off_t offset, uint8_t *buf, size_t size);
 
+
+
+/*
+ * virtFPGA (Funky). 
+ *
+ * Success: return SOLO5_R_OK (get 
+ * Failed : return SOLO5_R_AGAIN
+ *
+ */
+solo5_result_t solo5_acquire_fpga(void);
+
 #endif

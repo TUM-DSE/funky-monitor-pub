@@ -170,6 +170,7 @@ enum ukvm_hypercall {
     UKVM_HYPERCALL_NETWRITE,
     UKVM_HYPERCALL_NETREAD,
     UKVM_HYPERCALL_HALT,
+    UKVM_HYPERCALL_GETFPGA, // added
     UKVM_HYPERCALL_MAX
 };
 
@@ -249,6 +250,19 @@ struct ukvm_netread {
     /* OUT */
     int ret;
 };
+
+/* UKVM_HYPERCALL_GETFPGA */
+struct ukvm_fpga {
+  /* IN */
+  UKVM_GUEST_PTR(void *) data;
+  
+  /* IN/OUT */
+  size_t len;
+
+  /* OUT */
+  int ret;
+};
+
 
 /*
  * UKVM_HYPERCALL_POLL: Block until timeout_nsecs have passed or I/O is
