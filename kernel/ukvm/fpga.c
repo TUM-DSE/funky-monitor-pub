@@ -20,11 +20,11 @@
 
 #include "kernel.h"
 
-solo5_result_t solo5_acquire_fpga(void)
+solo5_result_t solo5_fpga_init(void)
 {
     struct ukvm_fpga vfpga;
 
-    ukvm_do_hypercall(UKVM_HYPERCALL_GETFPGA, &vfpga);
+    ukvm_do_hypercall(UKVM_HYPERCALL_FPGAINIT, &vfpga);
 
     return (vfpga.ret == 0) ? SOLO5_R_OK : SOLO5_R_EUNSPEC;
 }

@@ -33,11 +33,13 @@
 
 #include "ukvm.h"
 
+#include "funky_fpga_host.h"
+
 // static struct ukvm_fpgainfo fpgainfo;
 static char *fpganame;
 // static int fpgafd;
 
-static void hypercall_getfpga(struct ukvm_hv *hv, ukvm_gpa_t gpa)
+static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 {
     struct ukvm_fpga *fpga =
         UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpga));
@@ -50,8 +52,15 @@ static void hypercall_getfpga(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     //     return;
     // }
 
+    printf("\n*** entering monitor by hypercall...***\n\n");
+
+    char* binfile = "vadd.xclbin";
+    hello_fpga(binfile);
+
     fpga->len = ret;
     fpga->ret = 0;
+
+    printf("\n***  exiting monitor... ***\n\n");
 }
 
 static int handle_cmdarg(char *cmdarg)
@@ -71,10 +80,10 @@ static int setup(struct ukvm_hv *hv)
     // if (diskfd == -1)
     //     err(1, "Could not open disk: %s", diskfile);
     
-    printf("fpga setup is called.\n");
+    printf("monitor: register FPGA hypercalls.\n");
 
-    assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_GETFPGA,
-                hypercall_getfpga) == 0);
+    assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAINIT,
+                hypercall_fpgainit) == 0);
 
     return 0;
 }
