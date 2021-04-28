@@ -17,8 +17,11 @@
 # CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 TESTDIRS=test_hello test_globals test_ping_serve test_blk \
-         test_exception test_abort test_fpu test_time test_quiet \
-				 test_fpga
+         test_exception test_abort test_fpu test_time test_quiet
+
+ifneq ($(DISABLE_FPGA), yes)
+TESTDIRS+=test_fpga
+endif
 
 UKVM_TESTS=$(subst test, _test_ukvm, $(TESTDIRS))
 VIRTIO_TESTS=$(subst test, _test_virtio, $(TESTDIRS))

@@ -22,8 +22,12 @@
 .PHONY: all clean
 all: ukvm-bin
 
+ifneq ($(DISABLE_FPGA), yes)
+FPGA=fpga
+endif
+
 Makefile.ukvm: ukvm-configure
-	./ukvm-configure . blk net gdb dumpcore fpga
+	./ukvm-configure . blk net gdb dumpcore $(FPGA)
 
 -include Makefile.ukvm
 
