@@ -77,9 +77,30 @@ add_module ()
     fi
     
     if [ "$1" = "fpga" ]; then
-      ENABLE_FUNKY="yes"
-    fi
+      # OpenCL header is installed?
+      echo '#include <CL/cl2.hpp>' | g++ -c -xc++ - 2> /dev/null
+      if [ $? -gt 0 ]; then
+        echo "*****************************************************************"
+        echo "Opencl headers could not be found. fpga module will not get built"
+        echo "*****************************************************************"
 
+        return
+      fi
+      rm ./-.o
+
+      # XRT is installed?
+      if  [ -z "${XILINX_XRT}" ]; then
+        echo "*****************************************************************"
+        echo "Xilinx Runtime (XRT) could not be found. fpga module will not get built"
+        echo "*****************************************************************"
+
+        return
+      fi
+
+      # XRT OpenCL dependency is okay
+      ENABLE_FUNKY="yes"
+    fi 
+    
     enableit="-DUKVM_MODULE_$(echo $1 | tr '[a-z]' '[A-Z]')"
     add_obj "ukvm_module_$1.o"
     add_cflags "${enableit}"
@@ -180,21 +201,8 @@ FUNKY_INCLUDES=${FUNKY_INCLUDES}
 FUNKY_OBJS=${FUNKY_OBJS}
 FUNKY_HEADERS=${FUNKY_HEADERS}
 
-EOF
-
-if [ "${ENABLE_FUNKY}" = "yes" ]; then
-cat <<EOF>> Makefile.ukvm
 \$(UKVM_OBJS) \$(FUNKY_OBJS): \$(UKVM_HEADERS) \$(FUNKY_HEADERS)
 
-EOF
-else 
-cat <<EOF>> Makefile.ukvm
-\$(UKVM_OBJS): \$(UKVM_HEADERS) 
-
-EOF
-fi
-
-cat <<EOF>> Makefile.ukvm
 _build-ukvm:
 	mkdir -p _build-ukvm
 
@@ -204,17 +212,9 @@ _build-funky:
 _build-ukvm/ukvm_%.o: ${UKVM_SRC}/ukvm_%.c \$(MAKEFILE_LIST) | _build-ukvm
 	\$(UKVM_CC) \$(UKVM_CFLAGS) -c \$< -o \$@
 
-EOF
-
-if [ "${ENABLE_FUNKY}" = "yes" ]; then
-cat <<EOF>> Makefile.ukvm
 _build-funky/funky_%.o: ${UKVM_SRC}/funky_%.cpp \$(MAKEFILE_LIST) | _build-funky
 	\$(FUNKY_CPP) \$(FUNKY_CPPFLAGS) \$(FUNKY_INCLUDES) -c $< -o \$@
 
-EOF
-fi
-
-cat <<EOF>> Makefile.ukvm
 ukvm-bin: \$(UKVM_OBJS) \$(FUNKY_OBJS) \$(MAKEFILE_LIST)
 	\$(UKVM_CPP) \$(UKVM_LDFLAGS) -o \$@ \$(UKVM_OBJS) \$(FUNKY_OBJS) \$(UKVM_LDLIBS)
 
