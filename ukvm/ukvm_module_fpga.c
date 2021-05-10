@@ -44,7 +44,7 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     struct ukvm_fpga *fpga =
         UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpga));
 
-    int ret=1;
+    // int ret=1;
     // ret = read(netfd, UKVM_CHECKED_GPA_P(hv, rd->data, rd->len), rd->len);
     // if ((ret == 0) ||
     //     (ret == -1 && errno == EAGAIN)) {
@@ -52,15 +52,16 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     //     return;
     // }
 
+#ifndef EVAL_HYPERCALL_OH
     printf("\n*** entering monitor by hypercall...***\n\n");
 
     char* binfile = "vadd.xclbin";
     hello_fpga(binfile);
+#endif
 
-    fpga->len = ret;
     fpga->ret = 0;
 
-    printf("\n***  exiting monitor... ***\n\n");
+    // printf("\n***  exiting monitor... ***\n\n");
 }
 
 static int handle_cmdarg(char *cmdarg)

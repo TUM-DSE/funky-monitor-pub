@@ -210,10 +210,10 @@ _build-funky:
 	mkdir -p _build-funky
 
 _build-ukvm/ukvm_%.o: ${UKVM_SRC}/ukvm_%.c \$(MAKEFILE_LIST) | _build-ukvm
-	\$(UKVM_CC) \$(UKVM_CFLAGS) -c \$< -o \$@
+	\$(UKVM_CC) \$(UKVM_CFLAGS) \$(FUNKY_MACROS) -c \$< -o \$@
 
 _build-funky/funky_%.o: ${UKVM_SRC}/funky_%.cpp \$(MAKEFILE_LIST) | _build-funky
-	\$(FUNKY_CPP) \$(FUNKY_CPPFLAGS) \$(FUNKY_INCLUDES) -c $< -o \$@
+	\$(FUNKY_CPP) \$(FUNKY_CPPFLAGS) \$(FUNKY_MACROS) \$(FUNKY_INCLUDES) -c $< -o \$@
 
 ukvm-bin: \$(UKVM_OBJS) \$(FUNKY_OBJS) \$(MAKEFILE_LIST)
 	\$(UKVM_CPP) \$(UKVM_LDFLAGS) -o \$@ \$(UKVM_OBJS) \$(FUNKY_OBJS) \$(UKVM_LDLIBS)
