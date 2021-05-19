@@ -219,4 +219,9 @@ int ukvm_gdb_add_breakpoint(struct ukvm_hv *hv, gdb_breakpoint_type type,
 int ukvm_gdb_remove_breakpoint(struct ukvm_hv *hv, gdb_breakpoint_type type,
                                ukvm_gpa_t addr, size_t len);
 
+/*
+ * Handle the monitor option. A new thread will be spawned to listen for
+ * incoming commands over a socket
+ */
+void handle_mon(char *cmdarg);
 #endif /* UKVM_H */

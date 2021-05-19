@@ -105,6 +105,7 @@ static void usage(const char *prog)
     fprintf(stderr, "ARGS are optional arguments passed to the unikernel.\n");
     fprintf(stderr, "Core options:\n");
     fprintf(stderr, "  [ --mem=512 ] (guest memory in MB)\n");
+    fprintf(stderr, "  [ --mon=<path_to_socket> ] socket for passing commands\n");
     fprintf(stderr, "    --help (display this help)\n");
     fprintf(stderr, "Compiled-in modules: ");
     for (struct ukvm_module **m = ukvm_core_modules; *m; m++) {
@@ -151,6 +152,12 @@ int main(int argc, char **argv)
         matched = 0;
         if (strncmp("--mem=", *argv, 6) == 0) {
             handle_mem(*argv, &mem_size);
+            matched = 1;
+            argc--;
+            argv++;
+        }
+        if (strncmp("--mon=", *argv, 6) == 0) {
+            handle_mon(*argv);
             matched = 1;
             argc--;
             argv++;
