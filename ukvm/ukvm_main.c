@@ -191,6 +191,7 @@ int main(int argc, char **argv)
         err(1, "Could not install signal handler");
     if (sigaction(SIGTERM, &sa, NULL) == -1)
         err(1, "Could not install signal handler");
+    init_cpu_signals();
 
     ukvm_hv_mem_size(&mem_size);
     struct ukvm_hv *hv = ukvm_hv_init(mem_size);

@@ -37,6 +37,20 @@
 #include "ukvm_gdb.h"
 
 /*
+ * Atomix operations
+ */
+#define atomic_read(ptr)	__atomic_load_n(ptr, __ATOMIC_RELAXED)
+#define atomic_set(ptr, i)	__atomic_store_n(ptr, i, __ATOMIC_RELAXED)
+
+/*
+ * VM status it can have 3 states
+ * 0 - run or ready to run
+ * 1 - stop or it should stop
+ * 2 - it should resume
+ */
+extern int vm_state;
+
+/*
  * Hypervisor {arch,backend}-independent data is defined here.
  * {arch,backend}-dependent data (b) is defined in ukvm_hv_{backend}.h.
  */
@@ -224,4 +238,10 @@ int ukvm_gdb_remove_breakpoint(struct ukvm_hv *hv, gdb_breakpoint_type type,
  * incoming commands over a socket
  */
 void handle_mon(char *cmdarg);
+
+/*
+ * Set signal mask for IPI signals between monitor and vm thread
+ */
+void init_cpu_signals();
+
 #endif /* UKVM_H */
