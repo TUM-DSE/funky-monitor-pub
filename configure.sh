@@ -25,7 +25,8 @@ die()
 
 cc_maybe_gcc()
 {
-    ${CC} -dM -E - </dev/null | grep -Eq '^#define __GNUC__ [4-9]$'
+    # ${CC} -dM -E - </dev/null | grep -Eq '^#define __GNUC__ [4-9]$'
+    ${CC} -dM -E - </dev/null | grep -Eq -e '^#define __GNUC__ [4-9]$' -e '^#define __GNUC__ 1[0-9]$'
 }
 
 cc_is_clang()
