@@ -16,10 +16,25 @@
 
 #include "funky_fpga_host.h"
 
+#include "buffer.hpp"
+
 #include "funky_xcl2.hpp"
 #include <algorithm>
 #include <vector>
 #define DATA_SIZE 4096
+
+int init_ring_buffer(void* writer_addr, void* reader_addr) {
+  buffer::Reader<int> read_buffer  (writer_addr);
+  buffer::Writer<int> write_buffer (reader_addr);
+
+  auto out = read_buffer.pop();
+  while(out == NULL) // buffer is empty
+    out = read_buffer.pop();
+
+  std::cout << "UKVM: read buffer: " << *(out) << std::endl;
+
+  return 0;
+}
 
 int hello_fpga(char* binfile) {
     std::string binaryFile = binfile;

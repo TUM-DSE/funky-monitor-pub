@@ -286,6 +286,17 @@ solo5_result_t solo5_block_read(solo5_off_t offset, uint8_t *buf, size_t size);
  * Failed : return SOLO5_R_AGAIN
  *
  */
-solo5_result_t solo5_fpga_init(void);
+solo5_result_t solo5_fpga_info(void);
+
+struct solo5_fpgainit {
+    void* bs;
+    size_t bs_len;
+    void*  wr_queue;
+    size_t wr_queue_len;
+    void*  rd_queue;
+    size_t rd_queue_len;     
+};
+
+solo5_result_t solo5_fpga_init(struct solo5_fpgainit* init_info);
 
 #endif

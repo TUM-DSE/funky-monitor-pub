@@ -170,6 +170,7 @@ enum ukvm_hypercall {
     UKVM_HYPERCALL_NETWRITE,
     UKVM_HYPERCALL_NETREAD,
     UKVM_HYPERCALL_HALT,
+    UKVM_HYPERCALL_FPGAINFO, // added
     UKVM_HYPERCALL_FPGAINIT, // added
     UKVM_HYPERCALL_MAX
 };
@@ -251,13 +252,31 @@ struct ukvm_netread {
     int ret;
 };
 
-/* UKVM_HYPERCALL_GETFPGA */
-struct ukvm_fpga {
+/* UKVM_HYPERCALL_FPGAINFO */
+struct ukvm_fpgainfo {
   /* IN */
   UKVM_GUEST_PTR(void *) data;
   
   /* IN/OUT */
   size_t len;
+
+  /* OUT */
+  int ret;
+};
+
+
+/* UKVM_HYPERCALL_FPGAINIT */
+struct ukvm_fpgainit {
+  /* IN */
+  // UKVM_GUEST_PTR: ukvm treats pointer's address just as a uint64_t value (ukvm_gpa_t)
+  UKVM_GUEST_PTR(void *) bs;
+  UKVM_GUEST_PTR(void *) wr_queue;
+  UKVM_GUEST_PTR(void *) rd_queue;
+  
+  /* IN/OUT */
+  size_t bs_len;
+  size_t wr_queue_len;
+  size_t rd_queue_len;
 
   /* OUT */
   int ret;

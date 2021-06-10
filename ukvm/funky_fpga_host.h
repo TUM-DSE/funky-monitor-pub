@@ -10,6 +10,7 @@
 extern "C" {
 #endif
 
+int init_ring_buffer(void* writer_addr, void* reader_addr);
 int hello_fpga(char* binfile);
 
 #ifdef __cplusplus

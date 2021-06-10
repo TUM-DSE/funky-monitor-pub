@@ -45,8 +45,8 @@ int solo5_app_main(const struct solo5_start_info *si)
 
     // hello FPGA 
     puts("guest  : calling a hypercall...\n");
-    solo5_fpga_init();
-    puts("guest  : FPGA has been initialized.\n");
+    solo5_fpga_info();
+    puts("guest  : hypercall is finished.\n");
 
 
 

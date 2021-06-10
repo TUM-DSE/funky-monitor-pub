@@ -39,10 +39,33 @@
 static char *fpganame;
 // static int fpgafd;
 
+static void hypercall_fpgainfo(struct ukvm_hv *hv, ukvm_gpa_t gpa)
+{
+    struct ukvm_fpgainfo *fpga =
+        UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpgainfo));
+
+#ifndef EVAL_HYPERCALL_OH
+    printf("\n*** entering monitor by hypercall...***\n\n");
+
+    char* binfile = "vadd.xclbin";
+    hello_fpga(binfile);
+#endif
+
+    fpga->ret = 0;
+
+    // printf("\n***  exiting monitor... ***\n\n");
+}
+
 static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 {
-    struct ukvm_fpga *fpga =
-        UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpga));
+    struct ukvm_fpgainit *fpga =
+        UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpgainit));
+
+    // void* bitstream = UKVM_CHECKED_GPA_P(hv, fpga->bs, fpga->bs_len);
+    void* wr_queue  = UKVM_CHECKED_GPA_P(hv, fpga->wr_queue, fpga->wr_queue_len);
+    void* rd_queue  = UKVM_CHECKED_GPA_P(hv, fpga->rd_queue, fpga->rd_queue_len);
+
+    init_ring_buffer(wr_queue, rd_queue);
 
     // int ret=1;
     // ret = read(netfd, UKVM_CHECKED_GPA_P(hv, rd->data, rd->len), rd->len);
@@ -82,6 +105,9 @@ static int setup(struct ukvm_hv *hv)
     //     err(1, "Could not open disk: %s", diskfile);
     
     printf("monitor: register FPGA hypercalls.\n");
+
+    assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAINFO,
+                hypercall_fpgainfo) == 0);
 
     assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAINIT,
                 hypercall_fpgainit) == 0);

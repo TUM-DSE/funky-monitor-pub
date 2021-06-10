@@ -20,12 +20,29 @@
 
 #include "kernel.h"
 
-solo5_result_t solo5_fpga_init(void)
+solo5_result_t solo5_fpga_info(void)
+// solo5_result_t solo5_fpga_init(void* addr, size_t size)
 {
-    struct ukvm_fpga vfpga;
+    struct ukvm_fpgainfo vfpga;
 
-    ukvm_do_hypercall(UKVM_HYPERCALL_FPGAINIT, &vfpga);
+    ukvm_do_hypercall(UKVM_HYPERCALL_FPGAINFO, &vfpga);
 
     return (vfpga.ret == 0) ? SOLO5_R_OK : SOLO5_R_EUNSPEC;
 }
 
+solo5_result_t solo5_fpga_init(struct solo5_fpgainit* init_info)
+{
+  struct ukvm_fpgainit vfpga;
+
+  vfpga.bs        = init_info->bs;
+  vfpga.wr_queue  = init_info->wr_queue;
+  vfpga.rd_queue  = init_info->rd_queue;
+
+  vfpga.bs_len       = init_info->bs_len;
+  vfpga.wr_queue_len = init_info->wr_queue_len;
+  vfpga.rd_queue_len = init_info->rd_queue_len;
+
+  ukvm_do_hypercall(UKVM_HYPERCALL_FPGAINIT, &vfpga);
+
+  return (vfpga.ret == 0) ? SOLO5_R_OK : SOLO5_R_EUNSPEC;
+}
