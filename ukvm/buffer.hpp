@@ -48,9 +48,10 @@ namespace buffer {
     private: 
       bool is_owner; // ownership
       void* base; // pointer to the base addr of header/buffer
+      size_t mm_size; // allocated memory size 
       T* base_elem;  // pointer to the head of buffer
       size_t num; // num of elements in this buffer
-      // TODO: protect??
+      // TDO: protect??
       Header* header;
 
       void init_pointer(void* base_addr)
@@ -64,7 +65,7 @@ namespace buffer {
       void init_header(size_t cap)
       {
         assert(header != NULL);
-        header->capacity = cap+1; // max+1
+        header->capacity = cap;
         header->head = 0;
         header->tail = 0;
       }
@@ -74,8 +75,9 @@ namespace buffer {
       RingBuffer<T>(size_t cap) : is_owner(true)
       {
         // allocate memory space for (MAX+1) elements 
-        size_t mem_size = sizeof(Header) + (sizeof(T) * (cap+1)); 
-        base = std::malloc(mem_size);
+        cap++;
+        mm_size = sizeof(Header) + (sizeof(T) * cap); 
+        base = std::malloc(mm_size);
 
         init_pointer(base);
         init_header(cap);
@@ -86,6 +88,7 @@ namespace buffer {
       {
         base = base_addr;
         init_pointer(base);
+        mm_size = sizeof(Header) + (sizeof(T) * (header->capacity)); 
       }
 
       virtual ~RingBuffer()
@@ -150,6 +153,11 @@ namespace buffer {
           return base;
         else
           return NULL;
+      }
+
+      size_t& get_mmsize()
+      {
+        return mm_size;
       }
   };
 
