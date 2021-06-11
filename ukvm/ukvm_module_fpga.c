@@ -62,10 +62,10 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
         UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpgainit));
 
     // void* bitstream = UKVM_CHECKED_GPA_P(hv, fpga->bs, fpga->bs_len);
-    void* wr_queue  = UKVM_CHECKED_GPA_P(hv, fpga->wr_queue, fpga->wr_queue_len);
-    void* rd_queue  = UKVM_CHECKED_GPA_P(hv, fpga->rd_queue, fpga->rd_queue_len);
+    void* wr_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->wr_queue, fpga->wr_queue_len);
+    void* rd_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->rd_queue, fpga->rd_queue_len);
 
-    init_ring_buffer(wr_queue, rd_queue);
+    register_cmd_queues(wr_queue_addr, rd_queue_addr);
 
     // int ret=1;
     // ret = read(netfd, UKVM_CHECKED_GPA_P(hv, rd->data, rd->len), rd->len);
@@ -76,10 +76,10 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     // }
 
 #ifndef EVAL_HYPERCALL_OH
-    printf("\n*** entering monitor by hypercall...***\n\n");
+    // printf("\n*** entering monitor by hypercall...***\n\n");
 
-    char* binfile = "vadd.xclbin";
-    hello_fpga(binfile);
+    // char* binfile = "vadd.xclbin";
+    // hello_fpga(binfile);
 #endif
 
     fpga->ret = 0;

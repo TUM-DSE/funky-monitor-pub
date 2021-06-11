@@ -142,7 +142,7 @@ if [ "${ENABLE_FUNKY}" = "yes" ]; then
   FUNKY_CPP=${UKVM_CPP}  # for compiling Funky codes
   FUNKY_OBJS=
   FUNKY_HEADERS=
-  FUNKY_CPPFLAGS="-Wall -O0 -g -std=c++11"
+  FUNKY_CPPFLAGS="-Wall -O0 -g -std=c++17"
   FUNKY_INCLUDES="-I${XILINX_XRT}/include"
   add_funky_obj funky_fpga_host.o funky_xcl2.o
   add_funky_header funky_fpga_host.h funky_xcl2.hpp

@@ -19,19 +19,31 @@
 #include "buffer.hpp"
 
 #include "funky_xcl2.hpp"
+
+#include <memory>
 #include <algorithm>
 #include <vector>
 #define DATA_SIZE 4096
 
-int init_ring_buffer(void* writer_addr, void* reader_addr) {
-  buffer::Reader<int> read_buffer  (writer_addr);
-  buffer::Writer<int> write_buffer (reader_addr);
+// TODO: use FunkyCL command class as buffer elements (not int)
+// TODO: FunkyCL backend context class to save temp data & communicate with xocl lib
+std::unique_ptr<buffer::Reader<int>> request_q;
+std::unique_ptr<buffer::Writer<int>> response_q;
+ 
+ 
+int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr) {
+  request_q = std::make_unique<buffer::Reader<int>>(wr_queue_addr);
+  response_q = std::make_unique<buffer::Writer<int>>(rd_queue_addr);
 
-  auto out = read_buffer.pop();
+  // test a buffer read/write
+  auto out = request_q->pop();
   while(out == NULL) // buffer is empty
-    out = read_buffer.pop();
+    out = request_q->pop();
 
   std::cout << "UKVM: read buffer: " << *(out) << std::endl;
+
+  *out = *out * 2;
+  response_q->push(*out);
 
   return 0;
 }

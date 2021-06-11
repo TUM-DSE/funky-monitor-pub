@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-int init_ring_buffer(void* writer_addr, void* reader_addr);
+int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr);
 int hello_fpga(char* binfile);
 
 #ifdef __cplusplus
