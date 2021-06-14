@@ -248,6 +248,7 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
             ukvm_gpa_t gpa =
                 *(uint32_t *)((uint8_t *)run + run->io.data_offset);
             fn(hv, gpa);
+	    check_vm_state();
             break;
         }
 

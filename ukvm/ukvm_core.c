@@ -175,8 +175,24 @@ static void hypercall_poll(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     ts.tv_nsec = t->timeout_nsecs % 1000000000ULL;
 
     rc = ppoll(pollfds, npollfds, &ts, &pollsigmask);
-    assert(rc >= 0);
-    t->ret = rc;
+    if (rc >= 0) {
+	t->ret = rc;
+	return;
+    }
+    /*
+     * Ensure that poll returned -1 because it got interrupted
+     * by a signal which changed the vm_state. Otherwise an another
+     * error occurred.
+     */
+    assert(atomic_read(&vm_state) != 0);
+    /*
+     * Solo5 ensures the guests that the return value will be >= 0.
+     * In that context guests can assume that a non zero return value
+     * means an event happened. As a result we can not return
+     * a negative value, since guests might need some changes.
+     * We might want to retvisit this in the future.
+     */
+    t->ret = 0;
 }
 
 static int setup(struct ukvm_hv *hv)
@@ -194,6 +210,7 @@ static int setup(struct ukvm_hv *hv)
     sigfillset(&pollsigmask);
     sigdelset(&pollsigmask, SIGTERM);
     sigdelset(&pollsigmask, SIGINT);
+    sigdelset(&pollsigmask, SIGUSR1);
 
     return 0;
 }
