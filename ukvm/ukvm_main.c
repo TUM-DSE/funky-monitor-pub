@@ -128,16 +128,16 @@ static void usage(const char *prog)
 
 static int set_mem_prot(struct mprot *list)
 {
-	struct mprot *tmp = list;
+    struct mprot *tmp = list;
 
-	while(tmp) {
-		if (mprotect(tmp->addr,tmp->len, tmp->prot) == -1) {
-			perror("mprotectc");
-			return 1;
-		}
-		tmp = tmp->next;
-	}
-	return 0;
+    while(tmp) {
+        if (mprotect(tmp->addr,tmp->len, tmp->prot) == -1) {
+            perror("mprotectc");
+            return 1;
+        }
+        tmp = tmp->next;
+    }
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -217,7 +217,7 @@ int main(int argc, char **argv)
     setup_cmdline(cmdline, argc, argv);
 
     if (set_mem_prot(hv->list))
-	err(1, "Error while setting memory protection");
+        err(1, "Error while setting memory protection");
 
     setup_modules(hv);
 

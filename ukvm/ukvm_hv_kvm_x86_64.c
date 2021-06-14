@@ -168,10 +168,10 @@ static int check_vm_state()
         int r;
 
         printf("I should stop\n");
-	/*
-	 * Wait till we get a signal from monitor thread and we
-	 * can resume vcpu loop.
-	 */
+        /*
+         * Wait till we get a signal from monitor thread and we
+         * can resume vcpu loop.
+         */
         do {
             sigemptyset(&waitset);
             sigaddset(&waitset, SIGUSR1);
@@ -197,7 +197,7 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
     while (1) {
         ret = ioctl(hvb->vcpufd, KVM_RUN, NULL);
         if (ret == -1 && errno == EINTR) {
-	    /* Thread received a signal, maybe from monitor thread */
+            /* Thread received a signal, maybe from monitor thread */
             if (check_vm_state()) {
                 continue;
             }
@@ -248,7 +248,7 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
             ukvm_gpa_t gpa =
                 *(uint32_t *)((uint8_t *)run + run->io.data_offset);
             fn(hv, gpa);
-	    check_vm_state();
+            check_vm_state();
             break;
         }
 

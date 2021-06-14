@@ -45,11 +45,11 @@ int solo5_app_main(const struct solo5_start_info *si)
         puts("SUCCESS\n");
 
     for (int i =0; i < 1000000; i++) {
-	    for (int j = 0; j < 1000000000; j++) {
-		    if (j % 100000000 == 0) {
-			    puts("Hello again\n");
-		    }
-	    }
+        for (int j = 0; j < 1000000000; j++) {
+            if (j % 100000000 == 0) {
+                puts("Hello again\n");
+            }
+        }
     }
     return SOLO5_EXIT_SUCCESS;
 }

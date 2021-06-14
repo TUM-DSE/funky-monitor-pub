@@ -169,7 +169,7 @@ void ukvm_elf_load(const char *file, uint8_t *mem, size_t mem_size,
         uint64_t align = phdr[ph_i].p_align;
         uint64_t result;
         int prot;
-	struct mprot *mprot_new = NULL;
+        struct mprot *mprot_new = NULL;
 
         if (phdr[ph_i].p_type != PT_LOAD)
             continue;
@@ -212,25 +212,25 @@ void ukvm_elf_load(const char *file, uint8_t *mem, size_t mem_size,
         if (prot & PROT_WRITE && prot & PROT_EXEC)
             warnx("%s: Warning: phdr[%u] requests WRITE and EXEC permissions",
                   file, ph_i);
-	mprot_new = malloc(sizeof(struct mprot));
-	if (!mprot_new)
-		errx(1, "Out of memory");
-	mprot_new->addr = daddr;
-	mprot_new->len = _end - paddr;
-	mprot_new->prot = prot;
-	mprot_new->next = NULL;
-	if (!mprot_ls) {
-		mprot_ls = mprot_new;
-	} else {
-		mprot_last->next = mprot_new;
-	}
-	mprot_last = mprot_new;
-	/*
-	 * Memory permissions will be enforced later
-	 *
+        mprot_new = malloc(sizeof(struct mprot));
+        if (!mprot_new)
+            errx(1, "Out of memory");
+        mprot_new->addr = daddr;
+        mprot_new->len = _end - paddr;
+        mprot_new->prot = prot;
+        mprot_new->next = NULL;
+        if (!mprot_ls) {
+            mprot_ls = mprot_new;
+        } else {
+            mprot_last->next = mprot_new;
+        }
+        mprot_last = mprot_new;
+        /*
+         * Memory permissions will be enforced later
+         *
          *if (mprotect(daddr, _end - paddr, prot) == -1)
          *    goto out_error;
-	 */
+         */
     }
 
     free (phdr);

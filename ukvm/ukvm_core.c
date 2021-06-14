@@ -176,8 +176,8 @@ static void hypercall_poll(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 
     rc = ppoll(pollfds, npollfds, &ts, &pollsigmask);
     if (rc >= 0) {
-	t->ret = rc;
-	return;
+        t->ret = rc;
+        return;
     }
     /*
      * Ensure that poll returned -1 because it got interrupted

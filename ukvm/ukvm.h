@@ -39,8 +39,8 @@
 /*
  * Atomix operations
  */
-#define atomic_read(ptr)	__atomic_load_n(ptr, __ATOMIC_RELAXED)
-#define atomic_set(ptr, i)	__atomic_store_n(ptr, i, __ATOMIC_RELAXED)
+#define atomic_read(ptr)    __atomic_load_n(ptr, __ATOMIC_RELAXED)
+#define atomic_set(ptr, i)  __atomic_store_n(ptr, i, __ATOMIC_RELAXED)
 
 /*
  * VM status it can have 3 states
@@ -55,10 +55,10 @@ extern int vm_state;
  *  elf loading.
  */
 struct mprot {
-	void *addr;
-	size_t len;
-	int prot;
-	struct mprot *next;
+    void *addr;
+    size_t len;
+    int prot;
+    struct mprot *next;
 };
 
 /*
