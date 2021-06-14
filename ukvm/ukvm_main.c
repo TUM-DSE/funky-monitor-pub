@@ -126,6 +126,20 @@ static void usage(const char *prog)
     exit(1);
 }
 
+static int set_mem_prot(struct mprot *list)
+{
+	struct mprot *tmp = list;
+
+	while(tmp) {
+		if (mprotect(tmp->addr,tmp->len, tmp->prot) == -1) {
+			perror("mprotectc");
+			return 1;
+		}
+		tmp = tmp->next;
+	}
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
     size_t mem_size = 0x20000000;
@@ -196,11 +210,14 @@ int main(int argc, char **argv)
     ukvm_hv_mem_size(&mem_size);
     struct ukvm_hv *hv = ukvm_hv_init(mem_size);
 
-    ukvm_elf_load(elffile, hv->mem, hv->mem_size, &gpa_ep, &gpa_kend);
+    ukvm_elf_load(elffile, hv->mem, hv->mem_size, &gpa_ep, &gpa_kend, &hv->list);
 
     char *cmdline;
     ukvm_hv_vcpu_init(hv, gpa_ep, gpa_kend, &cmdline);
     setup_cmdline(cmdline, argc, argv);
+
+    if (set_mem_prot(hv->list))
+	err(1, "Error while setting memory protection");
 
     setup_modules(hv);
 

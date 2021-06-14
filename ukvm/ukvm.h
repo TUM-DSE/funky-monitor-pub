@@ -51,6 +51,17 @@
 extern int vm_state;
 
 /*
+ *  linked list of addresses that permissions are changed during
+ *  elf loading.
+ */
+struct mprot {
+	void *addr;
+	size_t len;
+	int prot;
+	struct mprot *next;
+};
+
+/*
  * Hypervisor {arch,backend}-independent data is defined here.
  * {arch,backend}-dependent data (b) is defined in ukvm_hv_{backend}.h.
  */
@@ -58,6 +69,7 @@ struct ukvm_hv {
     uint8_t *mem;
     size_t mem_size;
     struct ukvm_hvb *b;
+    struct mprot *list;
 };
 
 /*
@@ -65,7 +77,7 @@ struct ukvm_hv {
  * the entry point (gpa_ep) and last byte used by the binary (gpa_kend).
  */
 void ukvm_elf_load(const char *file, uint8_t *mem, size_t mem_size,
-        ukvm_gpa_t *p_entry, ukvm_gpa_t *p_end);                
+        ukvm_gpa_t *p_entry, ukvm_gpa_t *p_end, struct mprot **list);
 
 /*
  * Check that (gpa) and (gpa + sz) are within guest memory. Returns a host-side
