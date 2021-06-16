@@ -48,8 +48,44 @@ int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr) {
   return 0;
 }
 
-int hello_fpga(char* binfile) {
-    std::string binaryFile = binfile;
+int reconfigure_fpga(void* bin, size_t bin_size)
+{
+  cl_int err;
+  cl::Context context;
+  // cl::Kernel kernel;
+  // cl::CommandQueue q;
+
+  auto devices = xcl::get_xil_devices();
+  cl::Program::Binaries bins{{bin, bin_size}};
+
+  bool valid_device = false;
+  for (unsigned int i = 0; i < devices.size(); i++) {
+    auto device = devices[i];
+    // Creating Context and Command Queue for selected Device
+    OCL_CHECK(err, context = cl::Context(device, NULL, NULL, NULL, &err));
+    // OCL_CHECK(err, q = cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err));
+
+    std::cout << "Trying to program device[" << i << "]: " << device.getInfo<CL_DEVICE_NAME>() << std::endl;
+    cl::Program program(context, {device}, bins, NULL, &err);
+    if (err != CL_SUCCESS) {
+      std::cout << "Failed to program device[" << i << "] with xclbin file!\n";
+    } else {
+      std::cout << "Device[" << i << "]: program successful!\n";
+      // OCL_CHECK(err, krnl_vector_add = cl::Kernel(program, "vadd", &err));
+      valid_device = true;
+      break; // we break because we found a valid device
+    }
+  }
+  if (!valid_device) {
+    std::cout << "Failed to program any device found, exit!\n";
+    exit(EXIT_FAILURE);
+  }
+
+  return 0;
+}
+
+int hello_fpga(char* bin_name) {
+    std::string binaryFile = bin_name;
     size_t vector_size_bytes = sizeof(int) * DATA_SIZE;
     cl_int err;
     cl::Context context;

@@ -10,8 +10,11 @@
 extern "C" {
 #endif
 
+#include<stddef.h>
+
 int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr);
-int hello_fpga(char* binfile);
+int hello_fpga(char* bin_name);
+int reconfigure_fpga(void* bin, size_t bin_size);
 
 #ifdef __cplusplus
 }
