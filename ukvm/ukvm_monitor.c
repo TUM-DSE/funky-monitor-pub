@@ -8,16 +8,23 @@
 #include <sys/un.h>
 #include <errno.h>
 #include <unistd.h>
+#include <linux/kvm.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <assert.h>
+#include <sys/mman.h>
 
 #include "ukvm.h"
+#include "ukvm_hv_kvm.h"
 
 #define COMMAND_LEN 24
+
+typedef unsigned char *host_mvec_t;
 
 /*
  * Data for the monitor thread
  */
-struct mon_thr_data
-{
+struct mon_thr_data {
     char *socket_path;  /* The socket for the monitor */
     pthread_t vm_thr;   /* The thread which runs vcpu */
 };
@@ -28,6 +35,11 @@ struct mon_thr_data
  * As a result we need to be carefull when we access it.
  */
 int vm_state;
+
+/*
+ * A global variable for the file in which VM will be stored
+ */
+ static char save_file[20];
 
 /*
  * Handle the incomming commands
@@ -69,6 +81,30 @@ static void handle_mon_com(char *com_mon, pthread_t thr)
         if (atomic_read(&vm_state) != 1)
             return; /* Do nothing */
         atomic_set(&vm_state, 2);
+        r = pthread_kill(thr, SIGUSR1);
+        if (r < 0)
+            perror("pthread_kill stop");
+        return;
+    }
+
+    /*
+     * Savevm command will save vm state in the file specified after the
+     * command.
+     */
+    if (strncmp(com_mon, "savevm", 6) == 0) {
+        int r;
+        size_t filename_len;
+
+        if (strlen(com_mon) <= 7)
+            return; /* Do nothing */
+        if (atomic_read(&vm_state) == 3)
+            return; /* Do nothing */
+
+        com_mon += 7;
+        filename_len = strlen(com_mon);
+        strncpy(save_file, com_mon, filename_len);
+        warnx("I will save VM in file %s", save_file);
+        atomic_set(&vm_state, 3);
         r = pthread_kill(thr, SIGUSR1);
         if (r < 0)
             perror("pthread_kill stop");
@@ -192,4 +228,125 @@ void init_cpu_signals()
     if (r) {
         errx(1, "set signal mask %d\n", r);
     }
+}
+
+void savevm(struct ukvm_hv *hv)
+{
+    int fd;
+    struct kvm_regs kregs;
+    struct kvm_sregs sregs;
+    size_t nbytes;
+    long page_size;
+    size_t npages;
+    size_t ndumped = 0;
+    host_mvec_t mvec;
+    off_t num_pgs_off, file_off;
+
+    fd = open(save_file, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        warn("savevm: open(%s)", save_file);
+        return;
+    }
+    warnx("savevm: save guest to: %s", save_file);
+
+    if (ioctl(hv->b->vcpufd, KVM_GET_SREGS, &sregs) == -1) {
+        warn("savevm: KVM: ioctl(KVM_GET_SREGS) failed");
+        return;
+    }
+
+    if (ioctl(hv->b->vcpufd, KVM_GET_REGS, &kregs) == -1) {
+        warn("savevm: KVM: ioctl(KVM_GET_REGS) failed");
+        return;
+    }
+
+    nbytes = write(fd, &kregs, sizeof(struct kvm_regs));
+    if (nbytes < 0) {
+        warn("savevm: Error writing kvm_regs");
+        return;
+    }
+    else if (nbytes != sizeof(struct kvm_regs)) {
+        warnx("savevm: Short write() writing kvm_regs: %zd", nbytes);
+        return;
+    }
+
+    nbytes = write(fd, &sregs, sizeof(struct kvm_sregs));
+    if (nbytes < 0) {
+        warn("savevm: Error writing kvm_sregs");
+        return;
+    }
+    else if (nbytes != sizeof(struct kvm_sregs)) {
+        warnx("savevm: Short write() writing kvm_sregs: %zd", nbytes);
+        return;
+    }
+
+    page_size = sysconf(_SC_PAGESIZE);
+    if (page_size == -1) {
+        warn("savevm: Could not determine _SC_PAGESIZE");
+        return;
+    }
+    assert (hv->mem_size % page_size == 0);
+    npages = hv->mem_size / page_size;
+    mvec = malloc(npages);
+    assert (mvec);
+    if (mincore(hv->mem, hv->mem_size, mvec) == -1) {
+        warn("savevm: mincore() failed");
+        return;
+    }
+    nbytes = write(fd, &page_size, sizeof(long));
+    if (nbytes == -1) {
+        warn("savevm: Error writing page size");
+        free(mvec);
+        return;
+    } else if (nbytes != sizeof(long)) {
+        warnx("savevm: Short write in page size");
+        free(mvec);
+        return;
+    }
+    num_pgs_off = lseek(fd, 0, SEEK_CUR);
+    file_off = num_pgs_off + sizeof(size_t);
+    if (lseek(fd, file_off, SEEK_SET) != file_off) {
+        warnx("savevm: COuld not set file offset");
+        free(mvec);
+        return;
+    }
+    for (size_t pg = 0; pg < npages; pg++) {
+        if (mvec[pg] & 1) {
+            off_t pgoff = (pg * page_size);
+            ssize_t nbytes = write(fd, &pg, sizeof(size_t));
+            if (nbytes == -1) {
+                warn("savevm: Error dumping guest memory page %zd", pg);
+                free(mvec);
+                return;
+            } else if (nbytes != sizeof(size_t)) {
+                warnx("savevm: Short write dumping guest memory page"
+                        "%zd: %zd bytes", pg, nbytes);
+                free(mvec);
+                return;
+            }
+            nbytes = write(fd, hv->mem + pgoff, page_size);
+            if (nbytes == -1) {
+                warn("savevm: Error dumping guest memory page %zd", pg);
+                free(mvec);
+                return;
+            } else if (nbytes != page_size) {
+                warnx("savevm: Short write dumping guest memory page"
+                        "%zd: %zd bytes", pg, nbytes);
+                free(mvec);
+                return;
+            }
+            ndumped++;
+        }
+    }
+    free(mvec);
+    warnx("savevm: dumped %zd pages of total %zd pages", ndumped, npages);
+    nbytes = pwrite(fd, &ndumped, sizeof(size_t), num_pgs_off);
+    if (nbytes == -1) {
+        warn("savevm: Error writing total saved pages %zd", ndumped);
+        return;
+    } else if (nbytes != sizeof(size_t)) {
+        warnx("savevm: Short write on total saved pages"
+                " %zd: %zd bytes", ndumped, nbytes);
+        return;
+    }
+    close(fd);
 }

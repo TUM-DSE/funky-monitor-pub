@@ -256,4 +256,9 @@ void handle_mon(char *cmdarg);
  */
 void init_cpu_signals();
 
+/*
+ * Save vm state
+ */
+void savevm(struct ukvm_hv *hv);
+
 #endif /* UKVM_H */

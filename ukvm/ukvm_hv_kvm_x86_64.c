@@ -183,8 +183,12 @@ static int check_vm_state()
         printf("I will resume\n");
         break;
     }
+    case 3: {
+       warnx("I will save VM");
+       return 3;
+    }
     default:
-        errx(1, "Unknown vm state\n");
+        errx(1, "Unknown vm status\n");
     }
     return 1;
 }
@@ -198,8 +202,11 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
         ret = ioctl(hvb->vcpufd, KVM_RUN, NULL);
         if (ret == -1 && errno == EINTR) {
             /* Thread received a signal, maybe from monitor thread */
-            if (check_vm_state()) {
+            if (check_vm_state() != 3) {
                 continue;
+            } else {
+                savevm(hv);
+                errx(1, "Stopped to save VM state");
             }
         }
         if (ret == -1) {
@@ -248,7 +255,10 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
             ukvm_gpa_t gpa =
                 *(uint32_t *)((uint8_t *)run + run->io.data_offset);
             fn(hv, gpa);
-            check_vm_state();
+            if (check_vm_state() == 3) {
+                savevm(hv);
+                errx(1, "Stopped to save VM state");
+            }
             break;
         }
 
