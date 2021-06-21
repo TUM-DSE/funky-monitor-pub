@@ -252,6 +252,12 @@ int ukvm_gdb_remove_breakpoint(struct ukvm_hv *hv, gdb_breakpoint_type type,
 void handle_mon(char *cmdarg);
 
 /*
+ * Handle the load option. We will load a VM which state has been saved
+ * in the file pointed out in the command.
+ */
+char *handle_load(char *cmdarg);
+
+/*
  * Set signal mask for IPI signals between monitor and vm thread
  */
 void init_cpu_signals();
@@ -261,4 +267,11 @@ void init_cpu_signals();
  */
 void savevm(struct ukvm_hv *hv);
 
+/*
+ * Load VM from file. The file should have been created by 
+ * saving VM, using savevm.
+ */
+void loadvm(char *load_file, struct ukvm_hv *hv);
+
+void setup_cpuid(struct ukvm_hvb *hvb);
 #endif /* UKVM_H */

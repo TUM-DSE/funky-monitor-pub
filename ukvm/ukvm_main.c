@@ -147,6 +147,7 @@ int main(int argc, char **argv)
     const char *prog;
     const char *elffile;
     int matched;
+    char *mig_file = NULL;
 
     prog = basename(*argv);
     argc--;
@@ -172,6 +173,12 @@ int main(int argc, char **argv)
         }
         if (strncmp("--mon=", *argv, 6) == 0) {
             handle_mon(*argv);
+            matched = 1;
+            argc--;
+            argv++;
+        }
+        if (strncmp("--load=", *argv, 7) == 0) {
+            mig_file = handle_load(*argv);
             matched = 1;
             argc--;
             argv++;
@@ -212,9 +219,13 @@ int main(int argc, char **argv)
 
     ukvm_elf_load(elffile, hv->mem, hv->mem_size, &gpa_ep, &gpa_kend, &hv->list);
 
-    char *cmdline;
-    ukvm_hv_vcpu_init(hv, gpa_ep, gpa_kend, &cmdline);
-    setup_cmdline(cmdline, argc, argv);
+    if (!mig_file) {
+        char *cmdline;
+        ukvm_hv_vcpu_init(hv, gpa_ep, gpa_kend, &cmdline);
+        setup_cmdline(cmdline, argc, argv);
+    } else {
+        loadvm(mig_file, hv);
+    }
 
     if (set_mem_prot(hv->list))
         err(1, "Error while setting memory protection");

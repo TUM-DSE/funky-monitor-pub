@@ -44,7 +44,7 @@ void ukvm_hv_mem_size(size_t *mem_size) {
     ukvm_x86_mem_size(mem_size);
 }
 
-static void setup_cpuid(struct ukvm_hvb *hvb)
+void setup_cpuid(struct ukvm_hvb *hvb)
 {
     struct kvm_cpuid2 *kvm_cpuid;
     int max_entries = 100;

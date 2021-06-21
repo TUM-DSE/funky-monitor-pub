@@ -16,6 +16,7 @@
 
 #include "ukvm.h"
 #include "ukvm_hv_kvm.h"
+#include "ukvm_cpu_x86_64.h"
 
 #define COMMAND_LEN 24
 
@@ -39,7 +40,7 @@ int vm_state;
 /*
  * A global variable for the file in which VM will be stored
  */
- static char save_file[20];
+static char *save_file;
 
 /*
  * Handle the incomming commands
@@ -93,16 +94,14 @@ static void handle_mon_com(char *com_mon, pthread_t thr)
      */
     if (strncmp(com_mon, "savevm", 6) == 0) {
         int r;
-        size_t filename_len;
 
         if (strlen(com_mon) <= 7)
             return; /* Do nothing */
         if (atomic_read(&vm_state) == 3)
             return; /* Do nothing */
 
-        com_mon += 7;
-        filename_len = strlen(com_mon);
-        strncpy(save_file, com_mon, filename_len);
+	save_file = strtok(com_mon, " ");
+	save_file = strtok(NULL, " ");
         warnx("I will save VM in file %s", save_file);
         atomic_set(&vm_state, 3);
         r = pthread_kill(thr, SIGUSR1);
@@ -202,6 +201,25 @@ void handle_mon(char *cmdarg)
     if (rc) {
         errx(1, "Errorc creating monitor thread\n");
     }
+}
+
+char *handle_load(char *cmdarg)
+{
+    size_t path_len = strlen(cmdarg);
+    char *file;
+    int rc;
+
+    file = malloc(path_len);
+    if (!file)
+        errx(1, "Out of memory");
+
+    rc = sscanf(cmdarg, "--load=%s", file);
+    if (rc != 1) {
+        errx(1, "Malformed argument to --load");
+    }
+    warn("I will load state from file %s", file);
+
+    return file;
 }
 
 /*
@@ -349,4 +367,86 @@ void savevm(struct ukvm_hv *hv)
         return;
     }
     close(fd);
+}
+
+void loadvm(char *load_file, struct ukvm_hv *hv)
+{
+    int fd, ret;
+    struct ukvm_hvb *hvb = hv->b;
+    struct kvm_sregs sregs;
+    struct kvm_regs kregs;
+    long page_size;
+    size_t total_pgs = 0;
+
+    fd = open(load_file, O_RDONLY);
+    if (fd < 0) {
+        warn("loadvm: open(%s)", load_file);
+        return;
+    }
+
+    ukvm_x86_setup_gdt(hv->mem);
+    ukvm_x86_setup_pagetables(hv->mem, hv->mem_size);
+
+    setup_cpuid(hvb);
+
+    ret = read(fd, &kregs, sizeof(struct kvm_regs));
+    if (ret < sizeof(struct kvm_regs)) {
+        if (ret < 0)
+            warnx("Could not read kregs");
+        warnx("Incomplete read of kregs\n");
+    }
+
+    ret = read(fd, &sregs, sizeof(struct kvm_sregs));
+    if (ret < sizeof(struct kvm_sregs)) {
+        if (ret < 0)
+            warnx("Could not read sregs");
+        warnx("Incomplete read of sregs\n");
+    }
+
+    ret = ioctl(hvb->vcpufd, KVM_SET_SREGS, &sregs);
+    if (ret == -1)
+        err(1, "loadvm: KVM ioctl (SET_SREGS) failed");
+
+    ret = ioctl(hvb->vcpufd, KVM_SET_REGS, &kregs);
+    if (ret == -1)
+        err(1, "loadvm: KVM ioctl (SET_REGS) failed");
+    ret = read(fd, &page_size, sizeof(long));
+    if (ret < sizeof(long)) {
+        if (ret < 0)
+            warnx("Could not read pge_size");
+        warnx("Incomplete read of page_size\n");
+    }
+    ret = read(fd, &total_pgs, sizeof(size_t));
+    if (ret < sizeof(size_t)) {
+        if (ret < 0)
+            warnx("Could not read total pages number");
+        warnx("Incomplete read of page_size\n");
+    }
+    warnx("loadvm: I need to read %ld pages", total_pgs);
+    for(int i = 0; i < total_pgs; i++) {
+        off_t pgoff;
+        size_t pg;
+        ssize_t nbytes = read(fd, &pg, sizeof(size_t));
+        if (nbytes == -1) {
+            warn("loadvm: Error reading offset of guest memory page %zd", pg);
+            return;
+        } else if (nbytes != sizeof(size_t)) {
+            warnx("loadvm: Short read on guest memory page "
+                    "%zd: %zd bytes", pg, nbytes);
+        return;
+        }
+        pgoff = (pg * page_size);
+        nbytes = read(fd, hv->mem + pgoff, page_size);
+        if (nbytes == -1) {
+            warn("loadvm: Error reading guest memory page %zd", pg);
+            return;
+        } else if (nbytes != page_size) {
+            warnx("loadvm: Short read on guest memory page "
+                    "%zd: %zd bytes", pg, nbytes);
+            break;
+        }
+    }
+    warnx("loadvm: loaded %ld pages with page size %ld", total_pgs, page_size);
+    close(fd);
+    return;
 }
