@@ -18,7 +18,11 @@
 
 #include "buffer.hpp"
 
+#include "funky_msg.h"
+
 #include "funky_xcl2.hpp"
+
+#include "ukvm.h"
 
 #include <memory>
 #include <algorithm>
@@ -27,23 +31,33 @@
 
 // TODO: use FunkyCL command class as buffer elements (not int)
 // TODO: FunkyCL backend context class to save temp data & communicate with xocl lib
-std::unique_ptr<buffer::Reader<int>> request_q;
-std::unique_ptr<buffer::Writer<int>> response_q;
- 
+std::unique_ptr<buffer::Reader<funky_msg::request>>  request_q;
+std::unique_ptr<buffer::Writer<funky_msg::response>> response_q;
  
 int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr) {
-  request_q = std::make_unique<buffer::Reader<int>>(wr_queue_addr);
-  response_q = std::make_unique<buffer::Writer<int>>(rd_queue_addr);
+  request_q = std::make_unique<buffer::Reader<funky_msg::request>>(wr_queue_addr);
+  response_q = std::make_unique<buffer::Writer<funky_msg::response>>(rd_queue_addr);
 
-  // test a buffer read/write
-  auto out = request_q->pop();
-  while(out == NULL) // buffer is empty
-    out = request_q->pop();
+  /* receive an TRANSFER request and try to read it */
+  std::cout << "UKVM: test a cmd queue..." << std::endl;
+  auto req = request_q->pop();
+  while(req == NULL) // buffer is empty
+    req = request_q->pop();
 
-  std::cout << "UKVM: read buffer: " << *(out) << std::endl;
+  if(req->get_request_type() == funky_msg::TRANSFER)
+    std::cout << "received a TRANSFER request." << std::endl;
 
-  *out = *out * 2;
-  response_q->push(*out);
+  /* receive an EXEC request and try to read it */
+  req = request_q->pop();
+  while(req == NULL) // buffer is empty
+    req = request_q->pop();
+
+  if(req->get_request_type() == funky_msg::EXEC)
+    std::cout << "received an EXEC request." << std::endl;
+
+  // std::cout << "UKVM: read buffer: " << *(out) << std::endl;
+  // *out = *out * 2;
+  // response_q->push(*out);
 
   return 0;
 }
