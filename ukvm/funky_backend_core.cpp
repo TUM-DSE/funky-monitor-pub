@@ -14,12 +14,12 @@
 * under the License.
 */
 
-#include "funky_fpga_host.h"
+
+#include "funky_backend_core.h"
 
 #include "buffer.hpp"
-
+// TODO: change file name to funky_msg.h
 #include "funky_msg.h"
-
 #include "funky_xcl2.hpp"
 
 #include "ukvm.h"

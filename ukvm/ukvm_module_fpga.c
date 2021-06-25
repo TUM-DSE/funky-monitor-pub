@@ -33,7 +33,7 @@
 
 #include "ukvm.h"
 
-#include "funky_fpga_host.h"
+#include "funky_backend_core.h"
 
 // static struct ukvm_fpgainfo fpgainfo;
 static char *fpganame;
