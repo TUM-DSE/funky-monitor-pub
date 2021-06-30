@@ -58,23 +58,29 @@ static void hypercall_fpgainfo(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 
 static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 {
+    printf("UKVM: handling a hyper call...\n");
+
     struct ukvm_fpgainit *fpga =
         UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpgainit));
 
+    // TODO: reserves the pointer to bitstream (offset) for migration
     void* bitstream = UKVM_CHECKED_GPA_P(hv, fpga->bs, fpga->bs_len);
     void* wr_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->wr_queue, fpga->wr_queue_len);
     void* rd_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->rd_queue, fpga->rd_queue_len);
 
     // TODO: check here if any FPGA is available for the guest (unikernel)
-    // If available, the request is approved and ukvm creates a xocl execution context (will be a C++ class) so that guest kernels can be executed on the FPGA. 
+    // If available, ukvm assigns FPGA to the guest and instanciates an FPGA backend context so that guest kernels can be executed on the actual FPGA. 
     // If not, the guest has to wait until the FPGA is freed or (and?) transit to a migratable state
 
     // TODO: The request is always approved now.
+    if(wr_queue_addr && rd_queue_addr)
+      assign_fpga(wr_queue_addr, rd_queue_addr);
+      // register_cmd_queues(wr_queue_addr, rd_queue_addr);
+
     if(bitstream)
       reconfigure_fpga(bitstream, fpga->bs_len);
+      // reconfigure_fpga(bitstream, fpga->bs_len);
 
-    if(wr_queue_addr && rd_queue_addr)
-      register_cmd_queues(wr_queue_addr, rd_queue_addr);
 
     // int ret=1;
     // ret = read(netfd, UKVM_CHECKED_GPA_P(hv, rd->data, rd->len), rd->len);

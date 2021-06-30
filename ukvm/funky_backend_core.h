@@ -12,9 +12,25 @@ extern "C" {
 
 #include<stddef.h>
 
+/* just for test */
 int hello_fpga(char* bin_name);
 int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr);
+int test_program_fpga(void* bin, size_t bin_size);
+
+/* FPGA resource allocation */
+int assign_fpga(void* wr_queue_addr, void* rd_queue_addr);
 int reconfigure_fpga(void* bin, size_t bin_size);
+
+/* FPGA execution */
+// int init_task();
+// int init_memory();
+// int enqueue_task();
+// int enqueue_transfer();
+// int sync_fpga();
+
+/* FPGA migration */
+// int save_hw_context();
+// int resume_hw_context();
 
 #ifdef __cplusplus
 }

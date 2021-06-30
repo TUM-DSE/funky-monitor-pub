@@ -17,23 +17,63 @@
 
 #include "funky_backend_core.h"
 
-#include "buffer.hpp"
-// TODO: change file name to funky_msg.h
-#include "funky_msg.h"
-#include "funky_xcl2.hpp"
+#include "backend/buffer.hpp"
+#include "backend/funky_msg.hpp"
 
-#include "ukvm.h"
+#include "funky_xcl2.hpp"
+#include "funky_backend_context.hpp"
+
+#include "ukvm.h" // UKVM_CHECKED_GPA_P()
 
 #include <memory>
 #include <algorithm>
 #include <vector>
 #define DATA_SIZE 4096
 
-// TODO: use FunkyCL command class as buffer elements (not int)
-// TODO: FunkyCL backend context class to save temp data & communicate with xocl lib
+// TODO: Xocl backend context class to save temp data & communicate with xocl lib
+std::unique_ptr<funky_backend::XoclContext> bk_context;
+ 
+int assign_fpga(void* wr_queue_addr, void* rd_queue_addr) {
+  if(bk_context != nullptr) {
+    std::cout << "Warning: xocl context already exists." << std::endl;
+    return -1;
+  }
+
+  bk_context = std::make_unique<funky_backend::XoclContext>(wr_queue_addr, rd_queue_addr);
+
+  /* receive an TRANSFER request and try to read it */
+  std::cout << "TEST: reading dummy requests ..." << std::endl;
+  auto req = bk_context->read_request();
+
+  while(req == NULL) // buffer is empty
+    req = bk_context->read_request();
+
+  if(req->get_request_type() == funky_msg::TRANSFER)
+    std::cout << "received a TRANSFER request." << std::endl;
+
+  /* receive an EXEC request and try to read it */
+  req = bk_context->read_request();
+
+  while(req == NULL) // buffer is empty
+    req = bk_context->read_request();
+
+  if(req->get_request_type() == funky_msg::EXEC)
+    std::cout << "received an EXEC request." << std::endl;
+
+  return 0;
+}
+
+int reconfigure_fpga(void* bin, size_t bin_size)
+{
+  return bk_context->reconfigure_fpga(bin, bin_size);
+}
+
+
+
+/* test functions */
 std::unique_ptr<buffer::Reader<funky_msg::request>>  request_q;
 std::unique_ptr<buffer::Writer<funky_msg::response>> response_q;
- 
+
 int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr) {
   request_q = std::make_unique<buffer::Reader<funky_msg::request>>(wr_queue_addr);
   response_q = std::make_unique<buffer::Writer<funky_msg::response>>(rd_queue_addr);
@@ -62,7 +102,7 @@ int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr) {
   return 0;
 }
 
-int reconfigure_fpga(void* bin, size_t bin_size)
+int test_program_fpga(void* bin, size_t bin_size)
 {
   cl_int err;
   cl::Context context;
@@ -178,16 +218,16 @@ int hello_fpga(char* bin_name) {
     OCL_CHECK(err, err = krnl_vector_add.setArg(3, size));
 
     // Copy input data to device global memory
-    //// OCL_CHECK(err, err = q.enqueueMigrateMemObjects({buffer_in1, buffer_in2}, 0 /* 0 means from host*/));
+    OCL_CHECK(err, err = q.enqueueMigrateMemObjects({buffer_in1, buffer_in2}, 0 /* 0 means from host*/));
 
     // Launch the Kernel
-    // For HLS kernels global and local size is always (1,1,1). So, it is
-    // recommended
+    // For HLS kernels global and local size is always (1,1,1). So, it isi recommended
     // to always use enqueueTask() for invoking HLS kernel
     OCL_CHECK(err, err = q.enqueueTask(krnl_vector_add));
 
     // Copy Result from Device Global Memory to Host Local Memory
     OCL_CHECK(err, err = q.enqueueMigrateMemObjects({buffer_output}, CL_MIGRATE_MEM_OBJECT_HOST));
+
     q.finish();
     // OPENCL HOST CODE AREA END
 

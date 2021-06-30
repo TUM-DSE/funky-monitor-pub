@@ -45,14 +45,15 @@ namespace funky_msg {
    *
    */
   struct arg_info {
-    void* arg_src; 
-    size_t arg_size;
+    void* src; 
+    size_t size;
+    int index;
     int mem_id; // mem_id is -1 if it's not the OpenCL memory object
 
     // arg_info::arg_info(void* src, size_t size, ArgType type)
     //   : arg_src(src), arg_size(size), arg_type(type)
-    arg_info(void* src, size_t size, int id)
-      : arg_src(src), arg_size(size), mem_id(id)
+    arg_info(void* arg_src, size_t arg_size, int arg_index, int id)
+      : src(arg_src), size(arg_size), index(arg_index), mem_id(id)
     {}
   };
 
