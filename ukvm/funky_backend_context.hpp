@@ -31,6 +31,7 @@ namespace funky_backend {
       // cl::Device *device;
       cl::Context context;
       std::unique_ptr<cl::Program> program;
+      // cl::Program program;
       cl::CommandQueue queue;
 
       int kernel_num;
@@ -78,9 +79,10 @@ namespace funky_backend {
        * sending a response to the guest via cmd queue
        * TODO: implement here 
        */
-      bool send_response()
+      bool send_response(funky_msg::ReqType type)
       {
-        return true;
+        funky_msg::response response(type);
+        return response_q.push(response);
       }
 
       /* program kernels on FPGA */
@@ -95,6 +97,7 @@ namespace funky_backend {
         // std::vector<cl::Device> devices = {device};
         // auto test_program = cl::Program(context, {device}, bins, NULL, &err);
         program = std::make_unique<cl::Program>(context, p_devices, bins, nullptr, &err);
+        // auto tmp_program = cl::Program(context, p_devices, bins, nullptr, &err);
 
         // std::cout << "Trying to program device: " << device.getInfo<CL_DEVICE_NAME>() << std::endl;
         std::cout << "Trying to program device: " << p_devices[0].getInfo<CL_DEVICE_NAME>() << std::endl;

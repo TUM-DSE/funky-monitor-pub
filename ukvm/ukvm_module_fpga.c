@@ -69,28 +69,31 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     void* rd_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->rd_queue, fpga->rd_queue_len);
 
     // TODO: check here if any FPGA is available for the guest (unikernel)
-    // If available, ukvm assigns FPGA to the guest and instanciates an FPGA backend context so that guest kernels can be executed on the actual FPGA. 
-    // If not, the guest has to wait until the FPGA is freed or (and?) transit to a migratable state
+    /**
+     * If available, ukvm allocate FPGA to the guest and 
+     * instanciates an FPGA backend context so that the guest can offload tasks to FPGA. 
+     * If not, the guest has to wait until the FPGA is freed by another guest (or/and? transit to a migratable state)
+     */
 
     // TODO: The request is always approved now.
     if(wr_queue_addr && rd_queue_addr)
-      assign_fpga(wr_queue_addr, rd_queue_addr);
+      allocate_fpga(wr_queue_addr, rd_queue_addr);
       // register_cmd_queues(wr_queue_addr, rd_queue_addr);
 
     if(bitstream)
       reconfigure_fpga(bitstream, fpga->bs_len);
       // reconfigure_fpga(bitstream, fpga->bs_len);
+    
+    /* following processes are just for a test: validating Funky backend functions 
+     * TODO: remove here and develop new hypercalls to handle requests, to release FPGA
+     */
 
+    /* check the queue and invoke the request handler if any request is enqueued. */
+    int num_of_reqs = handle_requests();
+    printf("UKVM: %d requests are processed.\n", num_of_reqs);
 
-    // int ret=1;
-    // ret = read(netfd, UKVM_CHECKED_GPA_P(hv, rd->data, rd->len), rd->len);
-    // if ((ret == 0) ||
-    //     (ret == -1 && errno == EAGAIN)) {
-    //     rd->ret = -1;
-    //     return;
-    // }
-
-    // printf("\n*** entering monitor by hypercall...***\n\n");
+    /* release the FPGA */
+    release_fpga();
 
     // char* binfile = "vadd.xclbin";
     // hello_fpga(binfile);

@@ -30,10 +30,12 @@
 #include <vector>
 #define DATA_SIZE 4096
 
-// TODO: Xocl backend context class to save temp data & communicate with xocl lib
+/* Xocl backend context class to save temp data & communicate with xocl lib */
+// TODO: if being used by a worker thread, the thread instanciates this context
+// TODO: This must be explicitly released if the guest release FPGA (if not, SIGSEGV may occur)
 std::unique_ptr<funky_backend::XoclContext> bk_context;
  
-int assign_fpga(void* wr_queue_addr, void* rd_queue_addr) {
+int allocate_fpga(void* wr_queue_addr, void* rd_queue_addr) {
   if(bk_context != nullptr) {
     std::cout << "Warning: xocl context already exists." << std::endl;
     return -1;
@@ -41,24 +43,14 @@ int assign_fpga(void* wr_queue_addr, void* rd_queue_addr) {
 
   bk_context = std::make_unique<funky_backend::XoclContext>(wr_queue_addr, rd_queue_addr);
 
-  /* receive an TRANSFER request and try to read it */
-  std::cout << "TEST: reading dummy requests ..." << std::endl;
-  auto req = bk_context->read_request();
+  return 0;
+}
 
-  while(req == NULL) // buffer is empty
-    req = bk_context->read_request();
-
-  if(req->get_request_type() == funky_msg::TRANSFER)
-    std::cout << "received a TRANSFER request." << std::endl;
-
-  /* receive an EXEC request and try to read it */
-  req = bk_context->read_request();
-
-  while(req == NULL) // buffer is empty
-    req = bk_context->read_request();
-
-  if(req->get_request_type() == funky_msg::EXEC)
-    std::cout << "received an EXEC request." << std::endl;
+// TODO: develop a hypercall that allows the guest to release the allocated FPGA
+int release_fpga()
+{
+  /* explicitly release the contect if not, SIGSEGV may occur) */
+  auto released_context = bk_context.release();
 
   return 0;
 }
@@ -66,6 +58,70 @@ int assign_fpga(void* wr_queue_addr, void* rd_queue_addr) {
 int reconfigure_fpga(void* bin, size_t bin_size)
 {
   return bk_context->reconfigure_fpga(bin, bin_size);
+}
+
+
+int handle_exec_request(funky_msg::request& req)
+{
+  std::cout << "received an EXEC request." << std::endl;
+  return 0;
+}
+
+int handle_transfer_request(funky_msg::request& req)
+{
+  std::cout << "received a TRANSFER request." << std::endl;
+  return 0;
+}
+
+int handle_sync_request(funky_msg::request& req)
+{
+  std::cout << "received a SYNC request." << std::endl;
+
+  // std::cout << "UKVM: read buffer: " << *(out) << std::endl;
+  // *out = *out * 2;
+  // response_q->push(*out);
+  return 0;
+}
+
+/**
+ * @fn
+ * repeatly read a request queue and call request handlers until the queue gets empty.  
+ *
+ * @return the number of handled requests. 
+ */
+int handle_requests()
+{
+  int retired_reqs=0;
+  std::cout << "reading a request..." << std::endl;
+
+  using namespace funky_msg;
+
+  auto req = bk_context->read_request();
+  while(req != NULL) 
+  {
+    auto req_type = req->get_request_type();
+    switch (req_type)
+    {
+      case EXEC: 
+        handle_exec_request(*req);
+        break;
+      case TRANSFER: 
+        handle_transfer_request(*req);
+        break;
+      case SYNC: 
+        handle_sync_request(*req);
+        break;
+      default:
+        std::cout << "Warning: an unknown request." << std::endl;
+        break;
+    }
+
+    /* get the next request */
+    retired_reqs++;
+    req = bk_context->read_request();
+  }
+
+  return retired_reqs;
 }
 
 
@@ -101,6 +157,7 @@ int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr) {
 
   return 0;
 }
+
 
 int test_program_fpga(void* bin, size_t bin_size)
 {
