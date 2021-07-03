@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 #include<stddef.h>
+#include<stdint.h>
 
 /* just for test */
 int hello_fpga(char* bin_name);
@@ -23,13 +24,14 @@ int reconfigure_fpga(void* bin, size_t bin_size);
 int release_fpga(void);
 
 /* Request handler */
-int handle_requests(void);
+int handle_requests(struct ukvm_hv *hv);
 // int create_buffer();
 // int enqueue_task();
 // int enqueue_transfer();
 // int sync_fpga();
 
 /* FPGA migration */
+int save_bitstream(uint64_t addr, size_t size);
 // int save_hw_context();
 // int resume_hw_context();
 

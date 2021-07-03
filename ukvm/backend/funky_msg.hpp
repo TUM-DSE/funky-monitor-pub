@@ -18,22 +18,38 @@
 
 // TODO: change namespace? (e.g., funky_cmd? msg?)
 namespace funky_msg {
-  enum ReqType {EXEC, TRANSFER, SYNC};
+  enum ReqType {MEMORY, TRANSFER, EXECUTE, SYNC};
   enum MemType {BUFFER, PIPE, IMAGE};
 
-  /*
-   * mem_info is used to initialize FPGA memory by input/output data.
+  /**
+   * mem_info is used to initialize memory objects on FPGA with input/output data.
    * data flow/depenency of tasks is defined by arg_info in the subsequent EXEC resuests.
    *
    * */
   struct mem_info {
-    int mem_id;
-    MemType mem_type;
-    void* mem_src;
-    size_t mem_size;
+    int id;
+    MemType type;
+    uint64_t flags; /* read-only, write-only, ... */
+    void* src;
+    size_t size;
 
-    mem_info(int id, MemType type, void* src, size_t size)
-      : mem_id(id), mem_type(type), mem_src(src), mem_size(size)
+    mem_info(int mem_id, MemType mem_type, uint64_t mem_flags, void* mem_src, size_t mem_size)
+      : id(mem_id), type(mem_type), flags(mem_flags), src(mem_src), size(mem_size)
+    {}
+  };
+
+  /**
+   * mem_info is used to transfer data between Host and FPGA memory. 
+   * Memory objects must be already created in the backend context. 
+   *
+   * */
+  struct transfer_info {
+    int* ids; /* ids of memory to be transferred */
+    size_t num; /* number of memory to be transferred */
+    uint64_t flags; /* host to device, or device to host */
+
+    transfer_info(int* mem_ids, size_t mem_num, uint64_t trans_flags)
+      : ids(mem_ids), num(mem_num), flags(trans_flags)
     {}
   };
 
@@ -45,58 +61,73 @@ namespace funky_msg {
    *
    */
   struct arg_info {
-    void* src; 
-    size_t size;
     int index;
     int mem_id; // mem_id is -1 if it's not the OpenCL memory object
+    void* src; 
+    size_t size;
 
     // arg_info::arg_info(void* src, size_t size, ArgType type)
     //   : arg_src(src), arg_size(size), arg_type(type)
-    arg_info(void* arg_src, size_t arg_size, int arg_index, int id)
-      : src(arg_src), size(arg_size), index(arg_index), mem_id(id)
-    {}
+    arg_info(int arg_index, int mid, void* arg_src=nullptr, size_t arg_size=0)
+      : index(arg_index), mem_id(mid), src(arg_src), size(arg_size)
+    {
+      // TODO: error if mem_id is -1 but arg_src is null
+    }
   };
 
   class request {
     private:
       ReqType req_type;
 
-      /* for TRANSFER request */
+      /* for MEMORY request */
       uint32_t mem_num; 
       mem_info **mems; 
+
+      /* for TRANSFER request */
+      transfer_info *trans; 
       
-      /* for EXEC request */
-      /* The pointer specifies a guest memory address */
+      /* for EXECUTE request */
       const char* kernel_name;
+      size_t name_size;
       uint32_t arg_num; 
       arg_info **args; 
 
       /* for SYNC request */
-      uint32_t event_num;
+      // uint32_t event_num;
       // event_info events;
 
     public:
-      // delegating constructor
+      // delegating constructor (and for SYNC request)
       request(ReqType type) 
         : req_type(type), mem_num(0), mems(NULL), 
-          kernel_name(NULL), arg_num(0), args(NULL), event_num(0)
+          kernel_name(NULL), name_size(0), arg_num(0), args(NULL)// , event_num(0)
       {}
 
-      /* for TRANSFER request */
+      // TODO: merge these constructors into one  
+      /* for MEMORY request */
       request(ReqType type, uint32_t num, void** ptr)
         : request(type)
       {
-        // TODO: error if type != TRANSFER
+        // TODO: error if type != MEMORY
         mem_num = num;
         mems    = (mem_info**) ptr;
       }
 
+      /* for TRANSFER request */
+      request(ReqType type, void* ptr)
+        : request(type)
+      {
+        // TODO: error if type != TRANSFER
+        trans   = (transfer_info*) ptr;
+      }
+
       /* for EXEC request */
-      request(ReqType type, const char* name, uint32_t num, void** ptr)
+      request(ReqType type, const char* name, size_t size, uint32_t num, void** ptr)
         : request(type)
       {
         // TODO: error if type != EXEC
         kernel_name = name;
+        name_size = size;
         arg_num = num;
         args    = (arg_info**) ptr;
       }
@@ -105,30 +136,30 @@ namespace funky_msg {
         return req_type;
       }
 
-      const char* get_kernel_name(void) {
+      const char* get_kernel_name(size_t size) {
+        size = name_size;
         return kernel_name;
       }
 
-      /* 
-       * TODO: use iterator
-       * TODO: address translation from guest to ukvm
-       */
-      arg_info* get_arg_info(uint32_t num){
-        if(num >= arg_num)
+      // TODO: merge the following functions into get_metadata() ?
+      void* get_meminfo_array(int& num) {
+        if(mem_num == 0)
           return NULL;
 
-        return args[num];
+        num = mem_num;
+        return (void *)mems;
       }
 
-      /* 
-       * TODO: use iterator
-       * TODO: address translation from guest to ukvm
-       */
-      mem_info* get_mem_info(uint32_t num){
-        if(num >= mem_num)
+      void* get_transferinfo() {
+        return (void *)trans;
+      }
+
+      void* get_arginfo_array(int& num) {
+        if(arg_num == 0)
           return NULL;
 
-        return mems[num];
+        num = arg_num;
+        return (void *)args;
       }
   };
 

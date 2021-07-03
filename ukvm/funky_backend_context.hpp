@@ -14,6 +14,7 @@
 #include <memory> // make_unique
 #include <algorithm>
 #include <vector>
+#include <map>
 
 // TODO: user funky_hw_context to save/restore data on FPGA
 // #include "funky_hw_context.hpp"
@@ -25,26 +26,22 @@ namespace funky_backend {
       buffer::Reader<funky_msg::request>  request_q;
       buffer::Writer<funky_msg::response> response_q;
 
-      // std::string binaryFile;
-      // std::vector<cl::Platform> platforms;
-      // std::vector<cl::Device> devices;
-      // cl::Device *device;
+      uint64_t bin_guest_addr;
+      size_t bin_size;
       cl::Context context;
       std::unique_ptr<cl::Program> program;
-      // cl::Program program;
       cl::CommandQueue queue;
 
-      int kernel_num;
-      std::vector<cl::Kernel> kernels; 
+      // TODO: kernels that have been initialized once will be reused in the future? If not, we don't need to keep them here
+      std::map<const char*, cl::Kernel> kernels;
 
       // TODO: consider cl::Pipe, cl::Image
-      int buffer_num;
-      std::vector<cl::Buffer> buffers;
+      std::map<int, cl::Buffer> buffers;
       // TODO: cl::Event
 
     public:
       XoclContext(void* wr_queue_addr, void* rd_queue_addr) 
-        : request_q(wr_queue_addr), response_q(rd_queue_addr), kernel_num(0), buffer_num(0)
+        : request_q(wr_queue_addr), response_q(rd_queue_addr), bin_guest_addr(0), bin_size(0)
       {
         cl_int err;
 
@@ -69,7 +66,9 @@ namespace funky_backend {
       ~XoclContext()
       {}
 
-      /* receive a request by polling the cmd queue */
+      /** 
+       * receive a request by polling the cmd queue 
+       */
       funky_msg::request* read_request()
       {
         return request_q.pop();
@@ -85,7 +84,9 @@ namespace funky_backend {
         return response_q.push(response);
       }
 
-      /* program kernels on FPGA */
+      /** 
+       * reconfigure FPGA with a bitstream 
+       */
       int reconfigure_fpga(void* bin, size_t bin_size)
       {
         cl_int err = CL_SUCCESS;
@@ -94,12 +95,9 @@ namespace funky_backend {
         auto devices = xcl::get_xil_devices();
         std::vector <cl::Device> p_devices = {devices[0]};
 
-        // std::vector<cl::Device> devices = {device};
-        // auto test_program = cl::Program(context, {device}, bins, NULL, &err);
+        /* program bistream to the device (FPGA) */
         program = std::make_unique<cl::Program>(context, p_devices, bins, nullptr, &err);
-        // auto tmp_program = cl::Program(context, p_devices, bins, nullptr, &err);
 
-        // std::cout << "Trying to program device: " << device.getInfo<CL_DEVICE_NAME>() << std::endl;
         std::cout << "Trying to program device: " << p_devices[0].getInfo<CL_DEVICE_NAME>() << std::endl;
 
         if (err != CL_SUCCESS) {
@@ -112,24 +110,47 @@ namespace funky_backend {
         return err;
       }
 
-      /* allocate buffer in global memory */
-      void create_buffer(uint64_t mem_flags, size_t size, void* host_ptr)
+      /**
+       * create buffer in global memory 
+       */
+      void create_buffer(int mem_id, uint64_t mem_flags, size_t size, void* host_ptr)
       {
         cl_int err;
-        auto id = buffer_num;
-        OCL_CHECK(err,  buffers[id] = cl::Buffer(context, (cl_mem_flags) mem_flags, size, host_ptr, &err));
-        buffer_num++;
+
+        OCL_CHECK(err,  buffers.emplace(mem_id, cl::Buffer(context, (cl_mem_flags) mem_flags, size, host_ptr, &err)));
+        std::cout << "Succeeded to create buffer " << mem_id << std::endl;
       }
 
-      /* set OpenCL memory objects as arguments */
-      void set_arg(int kernel_id, funky_msg::arg_info* arg)
+      /* create a new kernel */
+      // TODO: return the kernel instance itself. 
+      // set_arg() and create_kernel() will be also changed to use the instance as an argument
+      void create_kernel(const char* kernel_name)
       {
         cl_int err;
-        auto id = kernel_id;
+
+        // TODO: search for the kernel map and if the same kernel already exists, skip the creation and use the existing one. 
+
+        // OCL_CHECK(err, kernels[id] = cl::Kernel(program, kernel_name, &err));
+        /* use kernel name as an index */
+        OCL_CHECK(err, kernels.emplace(kernel_name, cl::Kernel(*program, kernel_name, &err)));
+      }
+
+      /**
+       * set OpenCL memory objects as kernel arguments 
+       */
+      void set_arg(const char* kernel_name, funky_msg::arg_info* arg, void* src=nullptr)
+      {
+        cl_int err;
+        auto id = kernel_name;
 
         if(arg->mem_id == -1) {
           /* set variables other than OpenCL memory objects */
-          OCL_CHECK(err, err = kernels[id].setArg(arg->index, arg->size, (const void*)arg->src));
+          if(src == nullptr) {
+            std::cout << "arg addr error." << std::endl;
+            return;
+          }
+
+          OCL_CHECK(err, err = kernels[id].setArg(arg->index, arg->size, (const void*)src));
         }
         else {
           /* set OpenCL memory objects as arguments */
@@ -137,27 +158,18 @@ namespace funky_backend {
         }
       }
 
-      /* Launch the Kernel */
-      void enqueue_kernel(char* kernel_name, uint32_t arg_num, funky_msg::arg_info** args)
+      /**
+       * launch the kernel 
+       */
+      void enqueue_kernel(const char* kernel_name)
       {
         cl_int err;
-
-        auto id = kernel_num;
-
-        /* initialize a new kernel */
-        // OCL_CHECK(err, kernels[id] = cl::Kernel(program, kernel_name, &err));
-        OCL_CHECK(err, kernels[id] = cl::Kernel(*program, kernel_name, &err));
-
-        /* assign arguments to the kernel */
-        for (uint32_t i=0; i<arg_num; i++)
-          set_arg(id, args[arg_num]);
+        auto id = kernel_name;
 
         /* TODO: support for enqueueNDRangeKernel() */
         // For HLS kernels global and local size is always (1,1,1). So, it is recommended
         // to always use enqueueTask() for invoking HLS kernel
         OCL_CHECK(err, err = queue.enqueueTask(kernels[id]));
-
-        kernel_num++;
       }
 
       /**
@@ -167,23 +179,47 @@ namespace funky_backend {
        * @param (flags)   : 0 means from host, CL_MIGRATE_MEM_OBJECT_HOST means to host 
        *                     cl_mem_migration_flags, a bitfield based on unsigned int64
        */
-      void enqueue_transfer(std::vector<int> mem_ids, uint64_t flags)
+      void enqueue_transfer(int mem_ids[], size_t id_num, uint64_t flags)
       {
-        /* make a list of cl_mem objects to be migrated */
-        cl::vector<cl::Memory> mig_buffers(mem_ids.size());
         // TODO: error if buffers[i] does not exist
-        for(size_t i=0; i< mem_ids.size(); i++)
-          mig_buffers.push_back(buffers[i]);
+        cl_int err;
+        for(size_t i=0; i<id_num; i++)
+        {
+          auto id = mem_ids[i];
+          std::cout << "enqueue transfer for object[" << id << "]..." << std::endl;
+          /* do the memory migration */
+          OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
+        }
 
-        /* do the memory migration */
-        cl_uint err;
-        OCL_CHECK(err, err = queue.enqueueMigrateMemObjects(mig_buffers, (cl_mem_migration_flags)flags) );
+        /* make a list of cl_mem objects to be migrated */
+        // cl::vector<cl::Memory> mig_buffers(mem_ids.size());
+
+        // TODO: compare the execution time (call MigrateMemObjects() multiple times v.s. single call)
+        // for(size_t i=0; i< mem_ids.size(); i++)
+        //   mig_buffers.push_back(buffers[i]);
+
+        // /* do the memory migration */
+        // cl_uint err;
+        // OCL_CHECK(err, err = queue.enqueueMigrateMemObjects(mig_buffers, (cl_mem_migration_flags)flags) );
       }
 
-      /* wait for the completion of enqueued tasks */
+      /**
+       * wait for the completion of enqueued tasks 
+       */
       void sync_fpga()
       {
         queue.finish();
+      }
+
+      /** 
+       * functions for task migration 
+       *
+       * TODO: design a hw_context class for migration and remove this function to that??
+       */
+      void save_bitstream(uint64_t addr, size_t size)
+      {
+        bin_guest_addr = addr;
+        bin_size = size;
       }
   };
 

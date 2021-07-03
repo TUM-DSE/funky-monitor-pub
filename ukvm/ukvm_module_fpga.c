@@ -76,20 +76,23 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
      */
 
     // TODO: The request is always approved now.
-    if(wr_queue_addr && rd_queue_addr)
+    if(wr_queue_addr && rd_queue_addr) {
       allocate_fpga(wr_queue_addr, rd_queue_addr);
       // register_cmd_queues(wr_queue_addr, rd_queue_addr);
+    }
 
-    if(bitstream)
+    if(bitstream) {
+      save_bitstream(fpga->bs, fpga->bs_len);
       reconfigure_fpga(bitstream, fpga->bs_len);
       // reconfigure_fpga(bitstream, fpga->bs_len);
+    }
     
     /* following processes are just for a test: validating Funky backend functions 
      * TODO: remove here and develop new hypercalls to handle requests, to release FPGA
      */
 
     /* check the queue and invoke the request handler if any request is enqueued. */
-    int num_of_reqs = handle_requests();
+    int num_of_reqs = handle_requests(hv);
     printf("UKVM: %d requests are processed.\n", num_of_reqs);
 
     /* release the FPGA */

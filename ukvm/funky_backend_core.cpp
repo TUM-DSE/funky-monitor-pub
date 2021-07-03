@@ -46,12 +46,19 @@ int allocate_fpga(void* wr_queue_addr, void* rd_queue_addr) {
   return 0;
 }
 
-// TODO: develop a hypercall that allows the guest to release the allocated FPGA
+/** 
+ * explicitly release the contect if not, SIGSEGV may occur) 
+ * TODO: develop a hypercall that allows the guest to release the allocated FPGA
+ */
 int release_fpga()
 {
-  /* explicitly release the contect if not, SIGSEGV may occur) */
-  auto released_context = bk_context.release();
+  bk_context.release();
+  return 0;
+}
 
+int save_bitstream(uint64_t addr, size_t size)
+{
+  bk_context->save_bitstream(addr, size);
   return 0;
 }
 
@@ -61,35 +68,112 @@ int reconfigure_fpga(void* bin, size_t bin_size)
 }
 
 
-int handle_exec_request(funky_msg::request& req)
+/**
+ * Initialize and allocate a memory space on FPGA to the guest 
+ */
+int handle_memory_request(struct ukvm_hv *hv, funky_msg::request& req)
 {
-  std::cout << "received an EXEC request." << std::endl;
+  std::cout << "received a MEMORY request." << std::endl;
+
+  /* read meminfo from the guest memory */
+  int mem_num=0;
+  auto ptr  = req.get_meminfo_array(mem_num);
+  auto mems = (funky_msg::mem_info**) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::mem_info*) * mem_num);
+
+  for (auto i=0; i<mem_num; i++)
+  {
+    /* translate guest address to host address */
+    auto m = (funky_msg::mem_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) mems[i], sizeof(funky_msg::mem_info));
+    std::cout << "mems[" << i << "], id: " << m->id << ", addr: " << m->src << ", size: " << m->size << std::endl;
+
+    void* src = UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) m->src, m->size);
+
+    /* create memory buffer on FPGA */
+    bk_context->create_buffer(m->id, m->flags, m->size, src);
+  }
+
   return 0;
 }
 
-int handle_transfer_request(funky_msg::request& req)
+/*
+ * Transfer data between guest memory and FPGA
+ **/
+int handle_transfer_request(struct ukvm_hv *hv, funky_msg::request& req)
 {
   std::cout << "received a TRANSFER request." << std::endl;
-  return 0;
-}
 
-int handle_sync_request(funky_msg::request& req)
-{
-  std::cout << "received a SYNC request." << std::endl;
+  /* read transfer info from the guest memory */
+  auto ptr     = req.get_transferinfo();
+  auto trans   = (funky_msg::transfer_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::transfer_info*));
+  auto mem_ids = (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) trans->ids, sizeof(int) * trans->num);
 
-  // std::cout << "UKVM: read buffer: " << *(out) << std::endl;
-  // *out = *out * 2;
-  // response_q->push(*out);
+  bk_context->enqueue_transfer(mem_ids, trans->num, trans->flags);
+
   return 0;
 }
 
 /**
- * @fn
- * repeatly read a request queue and call request handlers until the queue gets empty.  
- *
- * @return the number of handled requests. 
+ * Execute a kernel on FPGA
  */
-int handle_requests()
+int handle_exec_request(struct ukvm_hv *hv, funky_msg::request& req)
+{
+  std::cout << "received an EXECUTE request." << std::endl;
+  
+  /* read arginfo from the guest memory */
+  int arg_num=0;
+  auto ptr  = req.get_arginfo_array(arg_num);
+  auto args = (funky_msg::arg_info**) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::arg_info*) * arg_num);
+
+  /* create kernel */
+  size_t name_size=0;
+  auto name_ptr = req.get_kernel_name(name_size);
+  auto kernel_name = (const char*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) name_ptr, name_size);
+
+  bk_context->create_kernel(kernel_name);
+
+  for (auto i=0; i<arg_num; i++)
+  {
+    /* translate guest address to host address */
+    auto arg = (funky_msg::arg_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) args[i], sizeof(funky_msg::arg_info));
+    std::cout << "args[" << i << "], idx: " << arg->index << std::endl;
+
+    /* if the argument is variable, do the address translation */
+    void* src=nullptr;
+    if(arg->src != nullptr)
+      src = UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) arg->src, arg->size);
+
+    /* set the argument */
+    bk_context->set_arg(kernel_name, arg, src);
+  }
+
+  /* exeute the kernel */
+  bk_context->enqueue_kernel(kernel_name);
+
+  return 0;
+}
+
+/**
+ * Wait for a completion of all ongoing tasks running on FPGA
+ */
+int handle_sync_request(struct ukvm_hv *hv, funky_msg::request& req)
+{
+  std::cout << "received a SYNC request." << std::endl;
+
+  bk_context->sync_fpga();
+
+  std::cout << "UKVM: FPGA sync is done. Sending a response to guest..." << std::endl;
+
+  bk_context->send_response(funky_msg::SYNC);
+
+  return 0;
+}
+
+/**
+ * read all the requests in the queue and call corresponding request handlers. 
+ *
+ * @return the total number of retired requests. 
+ */
+int handle_requests(struct ukvm_hv *hv)
 {
   int retired_reqs=0;
   std::cout << "reading a request..." << std::endl;
@@ -102,14 +186,17 @@ int handle_requests()
     auto req_type = req->get_request_type();
     switch (req_type)
     {
-      case EXEC: 
-        handle_exec_request(*req);
+      case MEMORY: 
+        handle_memory_request(hv, *req);
         break;
       case TRANSFER: 
-        handle_transfer_request(*req);
+        handle_transfer_request(hv, *req);
+        break;
+      case EXECUTE: 
+        handle_exec_request(hv, *req);
         break;
       case SYNC: 
-        handle_sync_request(*req);
+        handle_sync_request(hv, *req);
         break;
       default:
         std::cout << "Warning: an unknown request." << std::endl;
@@ -148,7 +235,7 @@ int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr) {
   while(req == NULL) // buffer is empty
     req = request_q->pop();
 
-  if(req->get_request_type() == funky_msg::EXEC)
+  if(req->get_request_type() == funky_msg::EXECUTE)
     std::cout << "received an EXEC request." << std::endl;
 
   // std::cout << "UKVM: read buffer: " << *(out) << std::endl;
