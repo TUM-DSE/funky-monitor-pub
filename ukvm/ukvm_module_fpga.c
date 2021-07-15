@@ -58,7 +58,7 @@ static void hypercall_fpgainfo(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 
 static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 {
-    printf("UKVM: handling a hyper call...\n");
+    printf("UKVM: set up fpga...\n");
 
     struct ukvm_fpgainit *fpga =
         UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpgainit));
@@ -75,7 +75,8 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
      * If not, the guest has to wait until the FPGA is freed by another guest (or/and? transit to a migratable state)
      */
 
-    // TODO: The request is always approved now.
+    // TODO: FPGA resource allocation depends on the scheduler.
+    //       The request is always approved now because the scheduler doesn't exist.
     if(wr_queue_addr && rd_queue_addr) {
       allocate_fpga(wr_queue_addr, rd_queue_addr);
       // register_cmd_queues(wr_queue_addr, rd_queue_addr);
@@ -92,17 +93,26 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
      */
 
     /* check the queue and invoke the request handler if any request is enqueued. */
-    int num_of_reqs = handle_requests(hv);
+    int num_of_reqs = handle_fpga_requests(hv);
     printf("UKVM: %d requests are processed.\n", num_of_reqs);
 
     /* release the FPGA */
-    release_fpga();
+    // release_fpga();
 
-    // char* binfile = "vadd.xclbin";
-    // hello_fpga(binfile);
-  
     // printf("\n***  exiting monitor... ***\n\n");
     fpga->ret = 0;
+}
+
+static void hypercall_fpgareq(struct ukvm_hv *hv, ukvm_gpa_t gpa)
+{
+    printf("UKVM: handle requests...\n");
+
+    int* retired_reqs =
+        UKVM_CHECKED_GPA_P(hv, gpa, sizeof (int));
+
+    *retired_reqs = handle_fpga_requests(hv);
+
+    printf("UKVM: %d requests are processed.\n", *retired_reqs);
 }
 
 static int handle_cmdarg(char *cmdarg)
@@ -116,12 +126,6 @@ static int handle_cmdarg(char *cmdarg)
 
 static int setup(struct ukvm_hv *hv)
 {
-    /* TODO: add the XRT sample code here */
-
-    // diskfd = open(diskfile, O_RDWR);
-    // if (diskfd == -1)
-    //     err(1, "Could not open disk: %s", diskfile);
-    
     printf("monitor: register FPGA hypercalls.\n");
 
     assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAINFO,
@@ -129,6 +133,9 @@ static int setup(struct ukvm_hv *hv)
 
     assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAINIT,
                 hypercall_fpgainit) == 0);
+
+    assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAREQ,
+                hypercall_fpgareq) == 0);
 
     return 0;
 }

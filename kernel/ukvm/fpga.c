@@ -21,7 +21,6 @@
 #include "kernel.h"
 
 solo5_result_t solo5_fpga_info(void)
-// solo5_result_t solo5_fpga_init(void* addr, size_t size)
 {
     struct ukvm_fpgainfo vfpga;
 
@@ -46,3 +45,12 @@ solo5_result_t solo5_fpga_init(struct solo5_fpgainit* init_info)
 
   return (vfpga.ret == 0) ? SOLO5_R_OK : SOLO5_R_EUNSPEC;
 }
+
+int solo5_fpga_handle_request(void)
+{
+  int retired_reqs=0;
+  ukvm_do_hypercall(UKVM_HYPERCALL_FPGAREQ, &retired_reqs);
+
+  return retired_reqs;
+}
+

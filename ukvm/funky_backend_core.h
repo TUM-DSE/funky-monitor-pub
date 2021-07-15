@@ -24,7 +24,7 @@ int reconfigure_fpga(void* bin, size_t bin_size);
 int release_fpga(void);
 
 /* Request handler */
-int handle_requests(struct ukvm_hv *hv);
+int handle_fpga_requests(struct ukvm_hv *hv);
 // int create_buffer();
 // int enqueue_task();
 // int enqueue_transfer();

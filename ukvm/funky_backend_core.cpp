@@ -173,7 +173,7 @@ int handle_sync_request(struct ukvm_hv *hv, funky_msg::request& req)
  *
  * @return the total number of retired requests. 
  */
-int handle_requests(struct ukvm_hv *hv)
+int handle_fpga_requests(struct ukvm_hv *hv)
 {
   int retired_reqs=0;
   std::cout << "reading a request..." << std::endl;

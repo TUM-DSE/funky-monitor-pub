@@ -172,6 +172,7 @@ enum ukvm_hypercall {
     UKVM_HYPERCALL_HALT,
     UKVM_HYPERCALL_FPGAINFO, // added
     UKVM_HYPERCALL_FPGAINIT, // added
+    UKVM_HYPERCALL_FPGAREQ,  // added
     UKVM_HYPERCALL_MAX
 };
 
