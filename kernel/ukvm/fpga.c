@@ -54,3 +54,10 @@ int solo5_fpga_handle_request(void)
   return retired_reqs;
 }
 
+
+int solo5_fpga_free(void)
+{
+  ukvm_do_hypercall(UKVM_HYPERCALL_FPGAFREE, NULL);
+
+  return 0;
+}

@@ -301,4 +301,6 @@ solo5_result_t solo5_fpga_init(struct solo5_fpgainit* init_info);
 
 int solo5_fpga_handle_request(void);
 
+int solo5_fpga_free(void);
+
 #endif

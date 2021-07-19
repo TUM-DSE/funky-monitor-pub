@@ -96,11 +96,15 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     int num_of_reqs = handle_fpga_requests(hv);
     printf("UKVM: %d requests are processed.\n", num_of_reqs);
 
-    /* release the FPGA */
-    // release_fpga();
-
     // printf("\n***  exiting monitor... ***\n\n");
     fpga->ret = 0;
+}
+
+static void hypercall_fpgafree(struct ukvm_hv *hv, ukvm_gpa_t gpa)
+{
+    printf("UKVM: release FPGA.\n");
+    /* release the FPGA */
+    release_fpga();
 }
 
 static void hypercall_fpgareq(struct ukvm_hv *hv, ukvm_gpa_t gpa)
@@ -136,6 +140,9 @@ static int setup(struct ukvm_hv *hv)
 
     assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAREQ,
                 hypercall_fpgareq) == 0);
+
+    assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAFREE,
+                hypercall_fpgafree) == 0);
 
     return 0;
 }
