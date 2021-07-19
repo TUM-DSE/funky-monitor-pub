@@ -45,7 +45,7 @@ namespace funky_backend {
       {
         cl_int err;
 
-        std::cout << "initializing Funky backend context....\n";
+        std::cout << "UKVM: initializing Funky backend context....\n";
 
         // TODO: assign as many devices to the guest as requested  
         //       Currently, only one device (devices[0]) is assigned to the guest.
@@ -98,13 +98,13 @@ namespace funky_backend {
         /* program bistream to the device (FPGA) */
         program = std::make_unique<cl::Program>(context, p_devices, bins, nullptr, &err);
 
-        std::cout << "Trying to program device: " << p_devices[0].getInfo<CL_DEVICE_NAME>() << std::endl;
+        std::cout << "UKVM: trying to program device: " << p_devices[0].getInfo<CL_DEVICE_NAME>() << std::endl;
 
         if (err != CL_SUCCESS) {
-          std::cout << "Failed to program device. \n";
+          std::cout << "UKVM: failed to program device. \n";
           // exit(EXIT_FAILURE);
         } else {
-          std::cout << "Succeeded to program device.\n";
+          std::cout << "UKVM: succeeded to program device.\n";
         }
 
         return err;
@@ -118,7 +118,12 @@ namespace funky_backend {
         cl_int err;
 
         OCL_CHECK(err,  buffers.emplace(mem_id, cl::Buffer(context, (cl_mem_flags) mem_flags, size, host_ptr, &err)));
-        std::cout << "Succeeded to create buffer " << mem_id << std::endl;
+        // std::cout << "Succeeded to create buffer " << mem_id << std::endl;
+      }
+
+      int get_created_buffer_num()
+      {
+        return buffers.size();
       }
 
       /* create a new kernel */
@@ -186,7 +191,7 @@ namespace funky_backend {
         for(size_t i=0; i<id_num; i++)
         {
           auto id = mem_ids[i];
-          std::cout << "enqueue transfer for object[" << id << "]..." << std::endl;
+          // std::cout << "enqueue transfer for object[" << id << "]..." << std::endl;
           /* do the memory migration */
           OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
         }

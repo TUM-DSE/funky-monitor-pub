@@ -73,18 +73,18 @@ int reconfigure_fpga(void* bin, size_t bin_size)
  */
 int handle_memory_request(struct ukvm_hv *hv, funky_msg::request& req)
 {
-  std::cout << "received a MEMORY request." << std::endl;
+  std::cout << "UKVM: received a MEMORY request." << std::endl;
 
   /* read meminfo from the guest memory */
   int mem_num=0;
   auto ptr  = req.get_meminfo_array(mem_num);
   auto mems = (funky_msg::mem_info**) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::mem_info*) * mem_num);
 
-  for (auto i=0; i<mem_num; i++)
+  for (auto i=bk_context->get_created_buffer_num(); i<mem_num; i++)
   {
     /* translate guest address to host address */
     auto m = (funky_msg::mem_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) mems[i], sizeof(funky_msg::mem_info));
-    std::cout << "mems[" << i << "], id: " << m->id << ", addr: " << m->src << ", size: " << m->size << std::endl;
+    // std::cout << "mems[" << i << "], id: " << m->id << ", addr: " << m->src << ", size: " << m->size << std::endl;
 
     void* src = UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) m->src, m->size);
 
@@ -100,12 +100,18 @@ int handle_memory_request(struct ukvm_hv *hv, funky_msg::request& req)
  **/
 int handle_transfer_request(struct ukvm_hv *hv, funky_msg::request& req)
 {
-  std::cout << "received a TRANSFER request." << std::endl;
+  std::cout << "UKVM: received a TRANSFER request." << std::endl;
 
   /* read transfer info from the guest memory */
   auto ptr     = req.get_transferinfo();
+  // std::cout << "trans_info ptr: " << ptr << std::endl;
+  // auto trans   = (funky_msg::transfer_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::transfer_info*));
   auto trans   = (funky_msg::transfer_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::transfer_info*));
+  // std::cout << "trans_request: addr: " << trans << ", num: " << trans->num << ", addr: " << trans->ids << std::endl;
   auto mem_ids = (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) trans->ids, sizeof(int) * trans->num);
+
+  // for (size_t i=0; i<trans->num; i++)
+  //   std::cout << "mem_ids[" << i << "], id: " << mem_ids[i] << ", addr: " << std::endl;
 
   bk_context->enqueue_transfer(mem_ids, trans->num, trans->flags);
 
@@ -117,12 +123,12 @@ int handle_transfer_request(struct ukvm_hv *hv, funky_msg::request& req)
  */
 int handle_exec_request(struct ukvm_hv *hv, funky_msg::request& req)
 {
-  std::cout << "received an EXECUTE request." << std::endl;
+  std::cout << "UKVM: received an EXECUTE request." << std::endl;
   
   /* read arginfo from the guest memory */
   int arg_num=0;
   auto ptr  = req.get_arginfo_array(arg_num);
-  auto args = (funky_msg::arg_info**) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::arg_info*) * arg_num);
+  auto args = (funky_msg::arg_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::arg_info) * arg_num);
 
   /* create kernel */
   size_t name_size=0;
@@ -134,8 +140,8 @@ int handle_exec_request(struct ukvm_hv *hv, funky_msg::request& req)
   for (auto i=0; i<arg_num; i++)
   {
     /* translate guest address to host address */
-    auto arg = (funky_msg::arg_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) args[i], sizeof(funky_msg::arg_info));
-    std::cout << "args[" << i << "], idx: " << arg->index << std::endl;
+    // auto arg = (funky_msg::arg_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) args[i], sizeof(funky_msg::arg_info));
+    auto arg = &(args[i]);
 
     /* if the argument is variable, do the address translation */
     void* src=nullptr;
@@ -157,7 +163,7 @@ int handle_exec_request(struct ukvm_hv *hv, funky_msg::request& req)
  */
 int handle_sync_request(struct ukvm_hv *hv, funky_msg::request& req)
 {
-  std::cout << "received a SYNC request." << std::endl;
+  std::cout << "UKVM: received a SYNC request." << std::endl;
 
   bk_context->sync_fpga();
 
@@ -176,7 +182,6 @@ int handle_sync_request(struct ukvm_hv *hv, funky_msg::request& req)
 int handle_fpga_requests(struct ukvm_hv *hv)
 {
   int retired_reqs=0;
-  std::cout << "reading a request..." << std::endl;
 
   using namespace funky_msg;
 
@@ -199,7 +204,7 @@ int handle_fpga_requests(struct ukvm_hv *hv)
         handle_sync_request(hv, *req);
         break;
       default:
-        std::cout << "Warning: an unknown request." << std::endl;
+        std::cout << "UKVM: Warning: an unknown request." << std::endl;
         break;
     }
 
