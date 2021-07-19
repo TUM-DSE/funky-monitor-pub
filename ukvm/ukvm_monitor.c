@@ -248,6 +248,8 @@ void init_cpu_signals()
     }
 }
 
+#define MSR_IA32_TSC                    0x10
+
 void savevm(struct ukvm_hv *hv)
 {
     int fd;
@@ -259,6 +261,11 @@ void savevm(struct ukvm_hv *hv)
     size_t ndumped = 0;
     host_mvec_t mvec;
     off_t num_pgs_off, file_off;
+    struct {
+        struct kvm_msrs info;
+        struct kvm_msr_entry entries[1];
+    } msr_data = {};
+    uint64_t tsc;
 
     fd = open(save_file, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
     if (fd < 0) {
@@ -277,6 +284,16 @@ void savevm(struct ukvm_hv *hv)
         return;
     }
 
+    memset(&msr_data, 0, sizeof(msr_data));
+    msr_data.info.nmsrs = 1;
+    msr_data.entries[0].index = MSR_IA32_TSC;
+    if (ioctl(hv->b->vcpufd, KVM_GET_MSRS, &msr_data) == -1 ) {
+        warn("savevm: KVM: ioctl(KVM_GET_REGS) failed");
+        return;
+    }
+    tsc = msr_data.entries[0].data;
+    assert(tsc != 0);
+
     nbytes = write(fd, &kregs, sizeof(struct kvm_regs));
     if (nbytes < 0) {
         warn("savevm: Error writing kvm_regs");
@@ -294,6 +311,16 @@ void savevm(struct ukvm_hv *hv)
     }
     else if (nbytes != sizeof(struct kvm_sregs)) {
         warnx("savevm: Short write() writing kvm_sregs: %zd", nbytes);
+        return;
+    }
+
+    nbytes = write(fd, &msr_data, sizeof(msr_data));
+    if (nbytes < 0) {
+        warn("savevm: Error writing kvm_regs");
+        return;
+    }
+    else if (nbytes != sizeof(msr_data)) {
+        warnx("savevm: Short write() writing msr_data: %zd", nbytes);
         return;
     }
 
@@ -377,6 +404,10 @@ void loadvm(char *load_file, struct ukvm_hv *hv)
     struct kvm_regs kregs;
     long page_size;
     size_t total_pgs = 0;
+    struct {
+        struct kvm_msrs info;
+        struct kvm_msr_entry entries[1];
+    } msr_data = {};
 
     fd = open(load_file, O_RDONLY);
     if (fd < 0) {
@@ -403,6 +434,13 @@ void loadvm(char *load_file, struct ukvm_hv *hv)
         warnx("Incomplete read of sregs\n");
     }
 
+    ret = read(fd, &msr_data, sizeof(msr_data));
+    if (ret < sizeof(msr_data)) {
+        if (ret < 0)
+            warnx("Could not read msr_data");
+        warnx("Incomplete read of msr_data\n");
+    }
+
     ret = ioctl(hvb->vcpufd, KVM_SET_SREGS, &sregs);
     if (ret == -1)
         err(1, "loadvm: KVM ioctl (SET_SREGS) failed");
@@ -410,6 +448,11 @@ void loadvm(char *load_file, struct ukvm_hv *hv)
     ret = ioctl(hvb->vcpufd, KVM_SET_REGS, &kregs);
     if (ret == -1)
         err(1, "loadvm: KVM ioctl (SET_REGS) failed");
+
+    ret = ioctl(hvb->vcpufd, KVM_SET_MSRS, &msr_data);
+    if (ret == -1)
+        err(1, "loadvm: KVM ioctl (SET_MSRS) failed");
+
     ret = read(fd, &page_size, sizeof(long));
     if (ret < sizeof(long)) {
         if (ret < 0)
