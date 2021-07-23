@@ -45,8 +45,6 @@ namespace funky_backend {
       {
         cl_int err;
 
-        std::cout << "UKVM: initializing Funky backend context....\n";
-
         // TODO: assign as many devices to the guest as requested  
         //       Currently, only one device (devices[0]) is assigned to the guest.
         auto devices = xcl::get_xil_devices();
@@ -97,15 +95,6 @@ namespace funky_backend {
 
         /* program bistream to the device (FPGA) */
         program = std::make_unique<cl::Program>(context, p_devices, bins, nullptr, &err);
-
-        std::cout << "UKVM: trying to program device: " << p_devices[0].getInfo<CL_DEVICE_NAME>() << std::endl;
-
-        if (err != CL_SUCCESS) {
-          std::cout << "UKVM: failed to program device. \n";
-          // exit(EXIT_FAILURE);
-        } else {
-          std::cout << "UKVM: succeeded to program device.\n";
-        }
 
         return err;
       }

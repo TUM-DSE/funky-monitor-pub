@@ -31,8 +31,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "ukvm.h"
-
 #include "funky_backend_core.h"
 
 // static struct ukvm_fpgainfo fpgainfo;
@@ -63,52 +61,60 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     struct ukvm_fpgainit *fpga =
         UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpgainit));
 
-    // TODO: reserves the pointer to bitstream (offset) for migration
     void* bitstream = UKVM_CHECKED_GPA_P(hv, fpga->bs, fpga->bs_len);
     void* wr_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->wr_queue, fpga->wr_queue_len);
     void* rd_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->rd_queue, fpga->rd_queue_len);
 
-    // TODO: check here if any FPGA is available for the guest (unikernel)
     /**
-     * If available, ukvm allocate FPGA to the guest and 
-     * instanciates an FPGA backend context so that the guest can offload tasks to FPGA. 
-     * If not, the guest has to wait until the FPGA is freed by another guest (or/and? transit to a migratable state)
+     * TODO: check if any FPGA is available for the guest
+     *
+     * If available, ukvm allocate FPGA to the guest and instanciates 
+     * an FPGA backend context so that the guest can offload tasks to FPGA. 
+     * If not, the guest has to wait until the FPGA is released by another guest 
      */
 
     // TODO: FPGA resource allocation depends on the scheduler.
     //       The request is always approved now because the scheduler doesn't exist.
-    if(wr_queue_addr && rd_queue_addr) {
+
+// #define DISABLE_FPGA_THR
+
+#ifdef DISABLE_FPGA_THR
+    if(wr_queue_addr && rd_queue_addr)
       allocate_fpga(wr_queue_addr, rd_queue_addr);
-      // register_cmd_queues(wr_queue_addr, rd_queue_addr);
-    }
 
-    if(bitstream) {
-      save_bitstream(fpga->bs, fpga->bs_len);
+    if(bitstream)
       reconfigure_fpga(bitstream, fpga->bs_len);
-      // reconfigure_fpga(bitstream, fpga->bs_len);
-    }
-    
-    /* following processes are just for a test: validating Funky backend functions 
-     * TODO: remove here and develop new hypercalls to handle requests, to release FPGA
-     */
 
-    /* check the queue and invoke the request handler if any request is enqueued. */
-    int num_of_reqs = handle_fpga_requests(hv);
-    printf("UKVM: %d requests are processed.\n", num_of_reqs);
+#else
+    struct fpga_thr_info thr_info = {
+      hv, 
+      bitstream, 
+      fpga->bs_len, 
+      wr_queue_addr, 
+      rd_queue_addr
+    };
 
-    // printf("\n***  exiting monitor... ***\n\n");
+    create_fpga_thread(&thr_info);
+#endif
+
     fpga->ret = 0;
 }
 
 static void hypercall_fpgafree(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 {
     printf("UKVM: release FPGA.\n");
+
+#ifdef DISABLE_FPGA_THR
     /* release the FPGA */
     release_fpga();
+#else
+    destroy_fpga_thread();
+#endif
 }
 
 static void hypercall_fpgareq(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 {
+#ifdef DISABLE_FPGA_THR
     printf("UKVM: handle requests...\n");
 
     int* retired_reqs =
@@ -117,6 +123,7 @@ static void hypercall_fpgareq(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     *retired_reqs = handle_fpga_requests(hv);
 
     printf("UKVM: %d requests are processed.\n", *retired_reqs);
+#endif
 }
 
 static int handle_cmdarg(char *cmdarg)
@@ -138,6 +145,7 @@ static int setup(struct ukvm_hv *hv)
     assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAINIT,
                 hypercall_fpgainit) == 0);
 
+    /* This hypercall is not used if threading is enabled */
     assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAREQ,
                 hypercall_fpgareq) == 0);
 

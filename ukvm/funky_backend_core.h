@@ -13,6 +13,24 @@ extern "C" {
 #include<stddef.h>
 #include<stdint.h>
 
+#include "ukvm.h"
+
+struct fpga_thr_info
+{
+  struct ukvm_hv *hv;
+  void *bs;
+  size_t bs_len;
+  void *wr_queue;
+  void *rd_queue;
+  // TODO: 
+  // void *saved_data;
+  // size_t saved_data_size;
+};
+
+/* multi-threading */
+void create_fpga_thread(struct fpga_thr_info* thr_info_ptr);
+void destroy_fpga_thread(void);
+
 /* just for test */
 int hello_fpga(char* bin_name);
 int register_cmd_queues(void* wr_queue_addr, void* rd_queue_addr);
@@ -25,13 +43,9 @@ int release_fpga(void);
 
 /* Request handler */
 int handle_fpga_requests(struct ukvm_hv *hv);
-// int create_buffer();
-// int enqueue_task();
-// int enqueue_transfer();
-// int sync_fpga();
 
 /* FPGA migration */
-int save_bitstream(uint64_t addr, size_t size);
+// int save_bitstream(uint64_t addr, size_t size);
 // int save_hw_context();
 // int resume_hw_context();
 
