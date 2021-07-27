@@ -105,6 +105,7 @@ static void usage(const char *prog)
     fprintf(stderr, "ARGS are optional arguments passed to the unikernel.\n");
     fprintf(stderr, "Core options:\n");
     fprintf(stderr, "  [ --mem=512 ] (guest memory in MB)\n");
+    fprintf(stderr, "  [ --mon=<path_to_socket> ] socket for passing commands\n");
     fprintf(stderr, "    --help (display this help)\n");
     fprintf(stderr, "Compiled-in modules: ");
     for (struct ukvm_module **m = ukvm_core_modules; *m; m++) {
@@ -125,6 +126,20 @@ static void usage(const char *prog)
     exit(1);
 }
 
+static int set_mem_prot(struct mprot *list)
+{
+    struct mprot *tmp = list;
+
+    while(tmp) {
+        if (mprotect(tmp->addr,tmp->len, tmp->prot) == -1) {
+            perror("mprotectc");
+            return 1;
+        }
+        tmp = tmp->next;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     size_t mem_size = 0x20000000;
@@ -132,6 +147,7 @@ int main(int argc, char **argv)
     const char *prog;
     const char *elffile;
     int matched;
+    char *mig_file = NULL;
 
     prog = basename(*argv);
     argc--;
@@ -151,6 +167,18 @@ int main(int argc, char **argv)
         matched = 0;
         if (strncmp("--mem=", *argv, 6) == 0) {
             handle_mem(*argv, &mem_size);
+            matched = 1;
+            argc--;
+            argv++;
+        }
+        if (strncmp("--mon=", *argv, 6) == 0) {
+            handle_mon(*argv);
+            matched = 1;
+            argc--;
+            argv++;
+        }
+        if (strncmp("--load=", *argv, 7) == 0) {
+            mig_file = handle_load(*argv);
             matched = 1;
             argc--;
             argv++;
@@ -184,15 +212,23 @@ int main(int argc, char **argv)
         err(1, "Could not install signal handler");
     if (sigaction(SIGTERM, &sa, NULL) == -1)
         err(1, "Could not install signal handler");
+    init_cpu_signals();
 
     ukvm_hv_mem_size(&mem_size);
     struct ukvm_hv *hv = ukvm_hv_init(mem_size);
 
-    ukvm_elf_load(elffile, hv->mem, hv->mem_size, &gpa_ep, &gpa_kend);
+    ukvm_elf_load(elffile, hv->mem, hv->mem_size, &gpa_ep, &gpa_kend, &hv->list);
 
-    char *cmdline;
-    ukvm_hv_vcpu_init(hv, gpa_ep, gpa_kend, &cmdline);
-    setup_cmdline(cmdline, argc, argv);
+    if (!mig_file) {
+        char *cmdline;
+        ukvm_hv_vcpu_init(hv, gpa_ep, gpa_kend, &cmdline);
+        setup_cmdline(cmdline, argc, argv);
+    } else {
+        loadvm(mig_file, hv);
+    }
+
+    if (set_mem_prot(hv->list))
+        err(1, "Error while setting memory protection");
 
     setup_modules(hv);
 

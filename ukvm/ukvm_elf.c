@@ -88,7 +88,7 @@ static ssize_t pread_in_full(int fd, void *buf, size_t count, off_t offset)
  *
  */
 void ukvm_elf_load(const char *file, uint8_t *mem, size_t mem_size,
-       ukvm_gpa_t *p_entry, ukvm_gpa_t *p_end)
+       ukvm_gpa_t *p_entry, ukvm_gpa_t *p_end, struct mprot **list)
 {
     int fd_kernel;
     ssize_t numb;
@@ -99,6 +99,7 @@ void ukvm_elf_load(const char *file, uint8_t *mem, size_t mem_size,
     Elf64_Half ph_i;
     Elf64_Phdr *phdr = NULL;
     Elf64_Ehdr hdr;
+    struct mprot *mprot_ls = NULL, *mprot_last = NULL;
 
     /* elf entry point (on physical memory) */
     *p_entry = 0;
@@ -168,6 +169,7 @@ void ukvm_elf_load(const char *file, uint8_t *mem, size_t mem_size,
         uint64_t align = phdr[ph_i].p_align;
         uint64_t result;
         int prot;
+        struct mprot *mprot_new = NULL;
 
         if (phdr[ph_i].p_type != PT_LOAD)
             continue;
@@ -210,13 +212,31 @@ void ukvm_elf_load(const char *file, uint8_t *mem, size_t mem_size,
         if (prot & PROT_WRITE && prot & PROT_EXEC)
             warnx("%s: Warning: phdr[%u] requests WRITE and EXEC permissions",
                   file, ph_i);
-        if (mprotect(daddr, _end - paddr, prot) == -1)
-            goto out_error;
+        mprot_new = malloc(sizeof(struct mprot));
+        if (!mprot_new)
+            errx(1, "Out of memory");
+        mprot_new->addr = daddr;
+        mprot_new->len = _end - paddr;
+        mprot_new->prot = prot;
+        mprot_new->next = NULL;
+        if (!mprot_ls) {
+            mprot_ls = mprot_new;
+        } else {
+            mprot_last->next = mprot_new;
+        }
+        mprot_last = mprot_new;
+        /*
+         * Memory permissions will be enforced later
+         *
+         *if (mprotect(daddr, _end - paddr, prot) == -1)
+         *    goto out_error;
+         */
     }
 
     free (phdr);
     close (fd_kernel);
     *p_entry = hdr.e_entry;
+    *list = mprot_ls;
     return;
 
 out_error:

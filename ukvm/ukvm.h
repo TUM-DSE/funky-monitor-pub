@@ -37,6 +37,31 @@
 #include "ukvm_gdb.h"
 
 /*
+ * Atomix operations
+ */
+#define atomic_read(ptr)    __atomic_load_n(ptr, __ATOMIC_RELAXED)
+#define atomic_set(ptr, i)  __atomic_store_n(ptr, i, __ATOMIC_RELAXED)
+
+/*
+ * VM status it can have 3 states
+ * 0 - run or ready to run
+ * 1 - stop or it should stop
+ * 2 - it should resume
+ */
+extern int vm_state;
+
+/*
+ *  linked list of addresses that permissions are changed during
+ *  elf loading.
+ */
+struct mprot {
+    void *addr;
+    size_t len;
+    int prot;
+    struct mprot *next;
+};
+
+/*
  * Hypervisor {arch,backend}-independent data is defined here.
  * {arch,backend}-dependent data (b) is defined in ukvm_hv_{backend}.h.
  */
@@ -44,6 +69,7 @@ struct ukvm_hv {
     uint8_t *mem;
     size_t mem_size;
     struct ukvm_hvb *b;
+    struct mprot *list;
 };
 
 /*
@@ -51,7 +77,7 @@ struct ukvm_hv {
  * the entry point (gpa_ep) and last byte used by the binary (gpa_kend).
  */
 void ukvm_elf_load(const char *file, uint8_t *mem, size_t mem_size,
-        ukvm_gpa_t *p_entry, ukvm_gpa_t *p_end);                
+        ukvm_gpa_t *p_entry, ukvm_gpa_t *p_end, struct mprot **list);
 
 /*
  * Check that (gpa) and (gpa + sz) are within guest memory. Returns a host-side
@@ -219,4 +245,33 @@ int ukvm_gdb_add_breakpoint(struct ukvm_hv *hv, gdb_breakpoint_type type,
 int ukvm_gdb_remove_breakpoint(struct ukvm_hv *hv, gdb_breakpoint_type type,
                                ukvm_gpa_t addr, size_t len);
 
+/*
+ * Handle the monitor option. A new thread will be spawned to listen for
+ * incoming commands over a socket
+ */
+void handle_mon(char *cmdarg);
+
+/*
+ * Handle the load option. We will load a VM which state has been saved
+ * in the file pointed out in the command.
+ */
+char *handle_load(char *cmdarg);
+
+/*
+ * Set signal mask for IPI signals between monitor and vm thread
+ */
+void init_cpu_signals();
+
+/*
+ * Save vm state
+ */
+void savevm(struct ukvm_hv *hv);
+
+/*
+ * Load VM from file. The file should have been created by 
+ * saving VM, using savevm.
+ */
+void loadvm(char *load_file, struct ukvm_hv *hv);
+
+void setup_cpuid(struct ukvm_hvb *hvb);
 #endif /* UKVM_H */

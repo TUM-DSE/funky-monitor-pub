@@ -32,6 +32,8 @@
 #include <sys/mman.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <signal.h>
 #include <linux/kvm.h>
 
 #include "ukvm.h"
@@ -42,7 +44,7 @@ void ukvm_hv_mem_size(size_t *mem_size) {
     ukvm_x86_mem_size(mem_size);
 }
 
-static void setup_cpuid(struct ukvm_hvb *hvb)
+void setup_cpuid(struct ukvm_hvb *hvb)
 {
     struct kvm_cpuid2 *kvm_cpuid;
     int max_entries = 100;
@@ -150,6 +152,47 @@ void ukvm_hv_vcpu_init(struct ukvm_hv *hv, ukvm_gpa_t gpa_ep,
     *cmdline = (char *)(hv->mem + X86_CMDLINE_BASE);
 }
 
+/*
+ * Examine the reason we gt interrupted. In case there was a
+ * stop request we should pause the vcpu loop and resume it
+ * after vm state changes again.
+ */
+static int check_vm_state()
+{
+    switch(atomic_read(&vm_state)) {
+    case 0:
+        break;
+    case 1: {
+        siginfo_t siginfo;
+        sigset_t waitset;
+        int r;
+
+        printf("I should stop\n");
+        /*
+         * Wait till we get a signal from monitor thread and we
+         * can resume vcpu loop.
+         */
+        do {
+            sigemptyset(&waitset);
+            sigaddset(&waitset, SIGUSR1);
+            r = sigwaitinfo(&waitset, &siginfo);
+            if (r == -1 && !(errno == EAGAIN || errno == EINTR))
+                errx(1, "sigtimedwait returned error\n");
+        } while (atomic_read(&vm_state) == 1);
+        atomic_set(&vm_state, 0);
+        printf("I will resume\n");
+        break;
+    }
+    case 3: {
+       warnx("I will save VM");
+       return 3;
+    }
+    default:
+        errx(1, "Unknown vm status\n");
+    }
+    return 1;
+}
+
 int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
 {
     struct ukvm_hvb *hvb = hv->b;
@@ -157,8 +200,15 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
 
     while (1) {
         ret = ioctl(hvb->vcpufd, KVM_RUN, NULL);
-        if (ret == -1 && errno == EINTR)
-            continue;
+        if (ret == -1 && errno == EINTR) {
+            /* Thread received a signal, maybe from monitor thread */
+            if (check_vm_state() != 3) {
+                continue;
+            } else {
+                savevm(hv);
+                errx(1, "Stopped to save VM state");
+            }
+        }
         if (ret == -1) {
             if (errno == EFAULT) {
                 struct kvm_regs regs;
@@ -205,6 +255,10 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
             ukvm_gpa_t gpa =
                 *(uint32_t *)((uint8_t *)run + run->io.data_offset);
             fn(hv, gpa);
+            if (check_vm_state() == 3) {
+                savevm(hv);
+                errx(1, "Stopped to save VM state");
+            }
             break;
         }
 
