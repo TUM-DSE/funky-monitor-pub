@@ -100,8 +100,8 @@ static void handle_mon_com(char *com_mon, pthread_t thr)
         if (atomic_read(&vm_state) == 3)
             return; /* Do nothing */
 
-	save_file = strtok(com_mon, " ");
-	save_file = strtok(NULL, " ");
+        save_file = strtok(com_mon, " ");
+        save_file = strtok(NULL, " ");
         warnx("I will save VM in file %s", save_file);
         atomic_set(&vm_state, 3);
         r = pthread_kill(thr, SIGUSR1);

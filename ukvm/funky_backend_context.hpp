@@ -184,17 +184,6 @@ namespace funky_backend {
           /* do the memory migration */
           OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
         }
-
-        /* make a list of cl_mem objects to be migrated */
-        // cl::vector<cl::Memory> mig_buffers(mem_ids.size());
-
-        // TODO: compare the execution time (call MigrateMemObjects() multiple times v.s. single call)
-        // for(size_t i=0; i< mem_ids.size(); i++)
-        //   mig_buffers.push_back(buffers[i]);
-
-        // /* do the memory migration */
-        // cl_uint err;
-        // OCL_CHECK(err, err = queue.enqueueMigrateMemObjects(mig_buffers, (cl_mem_migration_flags)flags) );
       }
 
       /**
@@ -208,15 +197,15 @@ namespace funky_backend {
       /** 
        * functions for task migration 
        *
-       * TODO: design a hw_context class for migration and remove this function to that??
+       * TODO: design a hw_context class for migration and move this function to that??
        */
       void save_bitstream(uint64_t addr, size_t size)
       {
         bin_guest_addr = addr;
         bin_size = size;
       }
-  };
 
+  }; // XoclContext
 
 } // funky_backend
 

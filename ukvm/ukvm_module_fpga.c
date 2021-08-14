@@ -93,7 +93,7 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
       rd_queue_addr
     };
 
-    create_fpga_thread(&thr_info);
+    create_fpga_worker(thr_info);
 #endif
 
     fpga->ret = 0;
@@ -107,7 +107,7 @@ static void hypercall_fpgafree(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     /* release the FPGA */
     release_fpga();
 #else
-    destroy_fpga_thread();
+    destroy_fpga_worker();
 #endif
 }
 

@@ -28,8 +28,8 @@ struct fpga_thr_info
 };
 
 /* multi-threading */
-void create_fpga_thread(struct fpga_thr_info* thr_info_ptr);
-void destroy_fpga_thread(void);
+void create_fpga_worker(struct fpga_thr_info thr_info);
+void destroy_fpga_worker(void);
 
 /* FPGA resource allocation */
 int allocate_fpga(void* wr_queue_addr, void* rd_queue_addr);
