@@ -206,6 +206,7 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
                 continue;
             } else {
                 savevm(hv);
+                savefpga(hv);
                 errx(1, "Stopped to save VM state");
             }
         }
@@ -257,6 +258,7 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
             fn(hv, gpa);
             if (check_vm_state() == 3) {
                 savevm(hv);
+                savefpga(hv);
                 errx(1, "Stopped to save VM state");
             }
             break;

@@ -40,7 +40,7 @@ namespace funky_backend {
       // TODO: cl::Event
 
     public:
-      XoclContext(void* wr_queue_addr, void* rd_queue_addr) 
+      XoclContext(void* wr_queue_addr, void* rd_queue_addr, void* mig_data, size_t mig_size) 
         : request_q(wr_queue_addr), response_q(rd_queue_addr), bin_guest_addr(0), bin_size(0)
       {
         cl_int err;
@@ -59,6 +59,9 @@ namespace funky_backend {
         // Creating Context and Command Queue for selected Device
         OCL_CHECK(err, context = cl::Context(device, NULL, NULL, NULL, &err));
         OCL_CHECK(err, queue = cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err));
+
+        if(mig_data)
+          std::cout << "TODO (migration): load FPGA context here!!! \n";
       }
 
       ~XoclContext()
@@ -74,7 +77,6 @@ namespace funky_backend {
 
       /**  
        * sending a response to the guest via cmd queue
-       * TODO: implement here 
        */
       bool send_response(funky_msg::ReqType type)
       {

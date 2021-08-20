@@ -60,10 +60,6 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     struct ukvm_fpgainit *fpga =
         UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpgainit));
 
-    void* bitstream = UKVM_CHECKED_GPA_P(hv, fpga->bs, fpga->bs_len);
-    void* wr_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->wr_queue, fpga->wr_queue_len);
-    void* rd_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->rd_queue, fpga->rd_queue_len);
-
     /**
      * TODO: check if any FPGA is available for the guest
      *
@@ -78,6 +74,10 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 // #define DISABLE_FPGA_THR
 
 #ifdef DISABLE_FPGA_THR
+    void* bitstream = UKVM_CHECKED_GPA_P(hv, fpga->bs, fpga->bs_len);
+    void* wr_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->wr_queue, fpga->wr_queue_len);
+    void* rd_queue_addr = UKVM_CHECKED_GPA_P(hv, fpga->rd_queue, fpga->rd_queue_len);
+
     if(wr_queue_addr && rd_queue_addr)
       allocate_fpga(wr_queue_addr, rd_queue_addr);
 
@@ -87,13 +87,18 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 #else
     struct fpga_thr_info thr_info = {
       hv, 
-      bitstream, 
+      fpga->bs,
       fpga->bs_len, 
-      wr_queue_addr, 
-      rd_queue_addr
+      fpga->wr_queue,
+      fpga->wr_queue_len, 
+      fpga->rd_queue, 
+      fpga->rd_queue_len,
+      NULL,
+      0
     };
 
     create_fpga_worker(thr_info);
+
 #endif
 
     fpga->ret = 0;
@@ -107,7 +112,11 @@ static void hypercall_fpgafree(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     /* release the FPGA */
     release_fpga();
 #else
-    destroy_fpga_worker();
+    if(is_fpga_worker_alive())
+      destroy_fpga_worker();
+    else
+      printf("Warning: FPGA worker is already destroyed.\n");
+
 #endif
 }
 

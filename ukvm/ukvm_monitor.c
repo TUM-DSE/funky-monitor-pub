@@ -18,6 +18,8 @@
 #include "ukvm_hv_kvm.h"
 #include "ukvm_cpu_x86_64.h"
 
+#include "funky_backend_core.h"
+
 #define COMMAND_LEN 24
 
 typedef unsigned char *host_mvec_t;
@@ -99,6 +101,32 @@ static void handle_mon_com(char *com_mon, pthread_t thr)
             return; /* Do nothing */
         if (atomic_read(&vm_state) == 3)
             return; /* Do nothing */
+
+        /* 
+         * Before pausing VM, check if FPGA is ready to be migrated. 
+         * If not, wait for the next sync point.  
+         */
+        if(is_fpga_worker_alive())
+        {
+            printf("MON-THR: start save_fpga() ...\n");
+
+            // 0. receive an initial msg from Worker
+            struct thr_msg* init_msg = recv_msg_from_worker();
+            if(init_msg->msg_type != MSG_INIT)
+                printf("Warning: not MSG_INIT \n");
+              
+
+            // 1. Send "save_fpga" req to Worker
+            struct thr_msg msg = {MSG_SAVEFPGA, NULL, 0};
+            send_msg_to_worker(&msg);
+
+            // 2. Wait for a response from Worker (sync point e.g., clFinish(), clWaitForEvents())
+            struct thr_msg* sync_msg = recv_msg_from_worker();
+            if(sync_msg->msg_type != MSG_SYNCED)
+                printf("Warning: not MSG_SYNCED \n");
+
+            /* FPGA is synced now */
+        }
 
         save_file = strtok(com_mon, " ");
         save_file = strtok(NULL, " ");
@@ -396,7 +424,7 @@ void savevm(struct ukvm_hv *hv)
     close(fd);
 }
 
-void loadvm(char *load_file, struct ukvm_hv *hv)
+long loadvm(char *load_file, struct ukvm_hv *hv)
 {
     int fd, ret;
     struct ukvm_hvb *hvb = hv->b;
@@ -412,7 +440,7 @@ void loadvm(char *load_file, struct ukvm_hv *hv)
     fd = open(load_file, O_RDONLY);
     if (fd < 0) {
         warn("loadvm: open(%s)", load_file);
-        return;
+        return -1;
     }
 
     ukvm_x86_setup_gdt(hv->mem);
@@ -472,17 +500,17 @@ void loadvm(char *load_file, struct ukvm_hv *hv)
         ssize_t nbytes = read(fd, &pg, sizeof(size_t));
         if (nbytes == -1) {
             warn("loadvm: Error reading offset of guest memory page %zd", pg);
-            return;
+            return -1;
         } else if (nbytes != sizeof(size_t)) {
             warnx("loadvm: Short read on guest memory page "
                     "%zd: %zd bytes", pg, nbytes);
-        return;
+        return -1;
         }
         pgoff = (pg * page_size);
         nbytes = read(fd, hv->mem + pgoff, page_size);
         if (nbytes == -1) {
             warn("loadvm: Error reading guest memory page %zd", pg);
-            return;
+            return -1;
         } else if (nbytes != page_size) {
             warnx("loadvm: Short read on guest memory page "
                     "%zd: %zd bytes", pg, nbytes);
@@ -490,6 +518,151 @@ void loadvm(char *load_file, struct ukvm_hv *hv)
         }
     }
     warnx("loadvm: loaded %ld pages with page size %ld", total_pgs, page_size);
+
+    off_t offset = lseek(fd, 0, SEEK_CUR);
+
+    close(fd);
+    return offset;
+}
+
+
+/* 
+ * void savefpga(struct ukvm_hv *hv)
+ *
+ * This function receives FPGA state from Worker thread and writes the data to save_file. 
+ * Worker thread is destroyed at the end.
+ */
+void savefpga(struct ukvm_hv *hv)
+{
+    /* Receive messages from Worker */
+    struct thr_msg* state_msg=NULL;
+    struct thr_msg* data_msg=NULL;
+    if(is_fpga_worker_alive()) {
+        state_msg = recv_msg_from_worker();
+
+        if(state_msg->msg_type == MSG_UPDATED)
+            data_msg = recv_msg_from_worker();
+    }
+
+    /* update data header */
+    struct fpga_data_header header = {0};
+    if(state_msg) {
+        warn("savefpga(): Worker is alive. \n");
+        header.sb_fpgainit = 1;
+    }
+
+    if(data_msg) {
+        warnx("savefpga(): got FPGA data, %lu Bytes at 0x%08lx\n", (uint64_t) data_msg->data, data_msg->size);
+        header.sb_fpgadata = 1;
+        header.size = data_msg->size;
+    }
+
+    /* open file */
+    int fd = open(save_file, O_WRONLY, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        warn("savefpga(): open(%s)", save_file);
+        return;
+    }
+    off_t offset = lseek(fd, 0, SEEK_END);
+    warnx("savefpga(): file is seeked to %lu\n", offset);
+
+
+    /* write FPGA data header */
+    size_t nbytes = write(fd, &header, sizeof(struct fpga_data_header));
+    if (nbytes < 0) {
+        warn("savefpga(): Error writing fpga_data_header");
+        return;
+    }
+
+    /* write FPGA thread info */
+    if(state_msg) {
+        nbytes = write(fd, state_msg->data, sizeof(struct fpga_thr_info));
+        if (nbytes < 0) {
+            warn("savefpga(): Error writing fpga_thr_info");
+            return;
+        }
+    }
+
+    /* write FPGA data */
+    if(data_msg) {
+        nbytes = write(fd, data_msg->data, data_msg->size);
+        if (nbytes < 0) {
+            warn("savefpga(): Error writing fpga_data");
+            return;
+        }
+    }
+
+    warnx("savefpga(): total file size is %lu\n", offset + nbytes);
+
+    if(state_msg)
+        destroy_fpga_worker();
+    else
+        warn("savefpga(): Worker doesn't exist. \n");
+
+    close(fd);
+    return;
+}
+
+/* 
+ * void loadfpga(char *load_file, long offset, struct ukvm_hv *hv)
+ *
+ * This function reads the previous FPGA state from save_file and recreates FPGA backend contexts. 
+ * Worker thread is also created if necessary.
+ */
+void loadfpga(char *load_file, long offset, struct ukvm_hv *hv)
+{
+    int fd = open(load_file, O_RDONLY);
+    if (fd < 0) {
+        warn("loadfpga(): open(%s)", load_file);
+        return;
+    }
+
+    lseek(fd, offset, SEEK_SET);
+
+    /* read FPGA data header */
+    struct fpga_data_header header;
+    int ret = read(fd, &header, sizeof(struct fpga_data_header));
+    if (ret < sizeof(struct fpga_data_header)) {
+        if (ret < 0)
+            warnx("Could not read fpga data header");
+        warnx("Incomplete read of fpga data header\n");
+    }
+
+    /* read FPGA thread info */
+    struct fpga_thr_info thr_info;
+    if(header.sb_fpgainit) {
+        ret = read(fd, &thr_info, sizeof(struct fpga_thr_info));
+        if (ret < sizeof(struct fpga_thr_info)) {
+            if (ret < 0)
+                warnx("Could not read fpga thr info");
+            warnx("Incomplete read of fpga thr info\n");
+        }
+
+        thr_info.hv = hv;
+    }
+
+    /* read FPGA data */
+    if(header.sb_fpgadata) {
+        size_t data_size = header.size;
+        void* fpga_data = malloc(data_size);
+
+        ret = read(fd, fpga_data, data_size);
+        if (ret < data_size) {
+            if (ret < 0)
+                warnx("Could not read fpga thr info");
+            warnx("Incomplete read of fpga thr info\n");
+        }
+
+        thr_info.mig_data = fpga_data;
+        thr_info.mig_size = data_size;
+    }
+
+    /* create Worker thread */
+    if(header.sb_fpgainit)
+        create_fpga_worker(thr_info);
+    else
+        warnx("loadfpga(): Worker is not created. \n");
+
     close(fd);
     return;
 }

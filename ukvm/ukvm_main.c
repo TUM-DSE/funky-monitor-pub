@@ -224,7 +224,8 @@ int main(int argc, char **argv)
         ukvm_hv_vcpu_init(hv, gpa_ep, gpa_kend, &cmdline);
         setup_cmdline(cmdline, argc, argv);
     } else {
-        loadvm(mig_file, hv);
+        long offset = loadvm(mig_file, hv);
+        loadfpga(mig_file, offset, hv);
     }
 
     if (set_mem_prot(hv->list))

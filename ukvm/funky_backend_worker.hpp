@@ -112,7 +112,7 @@ namespace funky_backend {
    *
    * @return the total number of retired requests. 
    */
-  int handle_fpga_requests(struct ukvm_hv *hv, funky_backend::XoclContext* ctx)
+  int handle_fpga_requests(struct ukvm_hv *hv, funky_backend::XoclContext* ctx, bool& fpga_sync_flag)
   {
     int retired_reqs=0;
     using namespace funky_msg;
@@ -121,6 +121,8 @@ namespace funky_backend {
     while(req != NULL) 
     {
       auto req_type = req->get_request_type();
+      (req_type == SYNC)? fpga_sync_flag = true: false;
+
       switch (req_type)
       {
         case MEMORY: 
@@ -148,64 +150,116 @@ namespace funky_backend {
     return retired_reqs;
   }
 
+  // TODO: Rename this to "Handler"?
+  // TODO: Distinguish the Handler for "guest", and Handler for "monitor"
   class Worker
   {
     public:
-      // TODO: add mpd_t for msg queue
-      Worker(struct fpga_thr_info& thr_info) 
-        // : m_thr_info(thr_info), m_fpga_context(thr_info.wr_queue, thr_info.rd_queue), m_worker(&funky_backend::Worker::fpga_worker_thread, nullptr)
-        : m_thr_info(thr_info), m_fpga_context(thr_info.wr_queue, thr_info.rd_queue)
-      {}
-
-      ~Worker()
+      Worker(struct fpga_thr_info& thr_info, void* rq_addr, void* wq_addr) 
+        : m_thr_info(thr_info), 
+          m_fpga_context(UKVM_CHECKED_GPA_P(thr_info.hv, thr_info.wr_queue, thr_info.wr_queue_len), 
+              UKVM_CHECKED_GPA_P(thr_info.hv, thr_info.rd_queue, thr_info.rd_queue_len), thr_info.mig_data, thr_info.mig_size), 
+          m_save_data(0), msg_read_queue(wq_addr), msg_write_queue(rq_addr), fpga_sync_flag(true)
       {
-        // if(m_worker.joinable()) 
-        //   m_worker.join();  
+        // TODO: check if this is safe
+        if(thr_info.mig_data != NULL)
+          free(thr_info.mig_data);
       }
 
-      void run(void)
-      {
-        /* TODO
-         * First, create backend_context
-         * 1. if this thread is created by hypercall from guest, 
-         *    create the context before polling. 
-         *
-         * 2. if this thread is created by 'loadvm' request from ukvm monitor thread, 
-         *    create the context and restore saved FPGA data.  
-         * */
-        // TODO: move this to constructor of XoclContext
-        m_fpga_context.save_bitstream((uint64_t)m_thr_info.bs, m_thr_info.bs_len);
+      ~Worker()
+      {}
 
-        /* Reconfigure FPGA */
-        auto ret = m_fpga_context.reconfigure_fpga(m_thr_info.bs, m_thr_info.bs_len);
+      /* Reconfigure FPGA */
+      void reconfigure_fpga()
+      {
+        void* bitstream = UKVM_CHECKED_GPA_P(m_thr_info.hv, m_thr_info.bs, m_thr_info.bs_len);
+
+        auto ret = m_fpga_context.reconfigure_fpga(bitstream, m_thr_info.bs_len);
         if(ret != CL_SUCCESS)
         {
           std::cout << "UKVM: failed to program device. \n";
           exit(EXIT_FAILURE);
         }
+      }
 
-        /* TODO
-         * Second, do polling cmd queues until any of the following events occurs: 
-         *
-         * 1. The guest does hypercall_fpgafree(): 
-         *    The hypercall do pthread_kill()? To do this, we need to save the thread ID of the worker thread somewhere. 
-         *    Or the guest does not perform the hypercall but send a kind of 'free' request via cmd queue?
-         *    This case the worker thread can exit by itself. Which is better?
-         *
-         * 2. The monitor thread sends a 'savevm' request. 
-         *    When the worker thread receives the request, it reads data from FPGA memory and save them into a contiguous region, and exit (an actual FPGA is released then). 
-         *    The data size and a pointer to the head is sent to the monitor thread and the monitor write data into a file. 
-         * 
-         * */
-        while(true)
-          handle_fpga_requests(m_thr_info.hv, &m_fpga_context);
+      int handle_fpga_requests()
+      {
+        auto num = funky_backend::handle_fpga_requests(m_thr_info.hv, &m_fpga_context, fpga_sync_flag);
+
+        return num;
+      }
+
+      bool is_fpga_updated()
+      {
+        // TODO: develop here
+        return false;
+      }
+
+      std::vector<uint8_t>& save_fpga()
+      {
+        // TODO: 
+        // 1. pass m_save_data to XoclContext
+        // 2. XoclContext calculates total data size and resize m_save_data
+        // 3. copy data
+
+        /* calculate total data size */
+        size_t bytes = 128;
+
+        /* copy data */
+        m_save_data.resize(bytes, 0xab);
+
+        return m_save_data;
+      }
+
+      bool handle_migration_requests(void)
+      {
+        auto req = msg_read_queue.pop();
+
+        bool migration_flag = false;
+        if(req->msg_type == MSG_SAVEFPGA)
+        {
+          std::cout << "!!! Receive SAVEFPGA req from monitor !!! \n";
+          migration_flag = true;
+        }
+
+        return migration_flag;
+      }
+
+      /** 
+       * receive a request by polling the cmd queue 
+       */
+      struct thr_msg* recv_msg()
+      {
+        return msg_read_queue.pop();
+      }
+
+      /**  
+       * sending a response to the guest via cmd queue
+       */
+      bool send_msg(struct thr_msg& msg)
+      {
+        return msg_write_queue.push(msg);
+      }
+
+      bool is_fpga_synced()
+      {
+        return fpga_sync_flag;
+      }
+
+      void* get_thr_info()
+      {
+        return (void *)&m_thr_info;
       }
 
     private:
       struct fpga_thr_info m_thr_info;
       funky_backend::XoclContext m_fpga_context;
       // std::thread m_worker;
-      std::vector<unsigned char> m_save_data; 
+      std::vector<uint8_t> m_save_data; 
+      buffer::Reader<struct thr_msg> msg_read_queue;
+      buffer::Writer<struct thr_msg> msg_write_queue;
+
+      bool fpga_sync_flag;
 
   }; // Worker
 

@@ -15,21 +15,52 @@ extern "C" {
 
 #include "ukvm.h"
 
+/* multi-threading */
 struct fpga_thr_info
 {
   struct ukvm_hv *hv;
-  void *bs;
+  uint64_t bs;
   size_t bs_len;
-  void *wr_queue;
-  void *rd_queue;
-  // TODO: 
-  // void *saved_data;
-  // size_t saved_data_size;
+  uint64_t wr_queue;
+  size_t wr_queue_len;
+  uint64_t rd_queue;
+  size_t rd_queue_len;
+
+  void* mig_data;
+  size_t mig_size;
 };
 
-/* multi-threading */
 void create_fpga_worker(struct fpga_thr_info thr_info);
 void destroy_fpga_worker(void);
+int is_fpga_worker_alive(void);
+
+
+/* inter-thread communication via msg queue */
+enum ThrMsgType {
+  // msg from Monitor to Worker
+  MSG_SAVEFPGA, MSG_LOADFPGA, 
+  // msg from Worker to Monitor/vCPU
+  MSG_INIT, MSG_SYNCED, MSG_UPDATED, MSG_SAVED, MSG_END
+};
+
+struct thr_msg {
+  enum ThrMsgType msg_type;
+  void* data;
+  size_t size;
+};
+
+struct fpga_data_header {
+  unsigned long size: 60;
+  unsigned int reserved: 2;
+  unsigned int sb_fpgainit: 1; // status bit
+  unsigned int sb_fpgadata: 1;
+};
+
+#define MSG_QUEUE_MAX_CAPACITY 8
+
+struct thr_msg* recv_msg_from_worker(void);
+int send_msg_to_worker(struct thr_msg *msg);
+
 
 /* FPGA resource allocation */
 int allocate_fpga(void* wr_queue_addr, void* rd_queue_addr);

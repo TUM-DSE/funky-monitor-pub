@@ -271,7 +271,14 @@ void savevm(struct ukvm_hv *hv);
  * Load VM from file. The file should have been created by 
  * saving VM, using savevm.
  */
-void loadvm(char *load_file, struct ukvm_hv *hv);
+long loadvm(char *load_file, struct ukvm_hv *hv);
+
+
+void savefpga(struct ukvm_hv *hv);
+
+
+void loadfpga(char *load_file, long offset, struct ukvm_hv *hv);
+
 
 void setup_cpuid(struct ukvm_hvb *hvb);
 #endif /* UKVM_H */
