@@ -21,7 +21,7 @@ namespace funky_backend {
    */
   int handle_memory_request(struct ukvm_hv *hv, funky_backend::XoclContext* context, funky_msg::request& req)
   {
-    std::cout << "UKVM: received a MEMORY request." << std::endl;
+    // std::cout << "UKVM: received a MEMORY request." << std::endl;
 
     /* read meminfo from the guest memory */
     int mem_num=0;
@@ -34,7 +34,7 @@ namespace funky_backend {
       // std::cout << "mems[" << i << "], id: " << m->id << ", addr: " << m->src << ", size: " << m->size << std::endl;
 
       void* src = UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) m->src, m->size);
-      context->create_buffer(m->id, m->flags, m->size, src);
+      context->create_buffer(m->id, m->flags, m->size, src, m->src);
     }
 
     return 0;
@@ -45,7 +45,7 @@ namespace funky_backend {
    **/
   int handle_transfer_request(struct ukvm_hv *hv, funky_backend::XoclContext* context, funky_msg::request& req)
   {
-    std::cout << "UKVM: received a TRANSFER request." << std::endl;
+    // std::cout << "UKVM: received a TRANSFER request." << std::endl;
 
     /* read transfer info from the guest memory */
     auto ptr     = req.get_transferinfo();
@@ -62,7 +62,7 @@ namespace funky_backend {
    */
   int handle_exec_request(struct ukvm_hv *hv, funky_backend::XoclContext* context, funky_msg::request& req)
   {
-    std::cout << "UKVM: received an EXECUTE request." << std::endl;
+    // std::cout << "UKVM: received an EXECUTE request." << std::endl;
 
     /* read arginfo from the guest memory */
     int arg_num=0;
@@ -99,7 +99,7 @@ namespace funky_backend {
    */
   int handle_sync_request(struct ukvm_hv *hv, funky_backend::XoclContext* context, funky_msg::request& req)
   {
-    std::cout << "UKVM: received a SYNC request." << std::endl;
+    // std::cout << "UKVM: received a SYNC request." << std::endl;
 
     context->sync_fpga();
     context->send_response(funky_msg::SYNC);
@@ -112,7 +112,7 @@ namespace funky_backend {
    *
    * @return the total number of retired requests. 
    */
-  int handle_fpga_requests(struct ukvm_hv *hv, funky_backend::XoclContext* ctx, bool& fpga_sync_flag)
+  int handle_fpga_requests(struct ukvm_hv *hv, funky_backend::XoclContext* ctx)
   {
     int retired_reqs=0;
     using namespace funky_msg;
@@ -121,7 +121,6 @@ namespace funky_backend {
     while(req != NULL) 
     {
       auto req_type = req->get_request_type();
-      (req_type == SYNC)? fpga_sync_flag = true: false;
 
       switch (req_type)
       {
@@ -157,14 +156,12 @@ namespace funky_backend {
     public:
       Worker(struct fpga_thr_info& thr_info, void* rq_addr, void* wq_addr) 
         : m_thr_info(thr_info), 
-          m_fpga_context(UKVM_CHECKED_GPA_P(thr_info.hv, thr_info.wr_queue, thr_info.wr_queue_len), 
-              UKVM_CHECKED_GPA_P(thr_info.hv, thr_info.rd_queue, thr_info.rd_queue_len), thr_info.mig_data, thr_info.mig_size), 
-          m_save_data(0), msg_read_queue(wq_addr), msg_write_queue(rq_addr), fpga_sync_flag(true)
-      {
-        // TODO: check if this is safe
-        if(thr_info.mig_data != NULL)
-          free(thr_info.mig_data);
-      }
+          m_fpga_context(
+              UKVM_CHECKED_GPA_P(thr_info.hv, thr_info.wr_queue, thr_info.wr_queue_len), 
+              UKVM_CHECKED_GPA_P(thr_info.hv, thr_info.rd_queue, thr_info.rd_queue_len)
+              ), 
+          m_save_data(0), msg_read_queue(wq_addr), msg_write_queue(rq_addr)
+      {}
 
       ~Worker()
       {}
@@ -184,31 +181,43 @@ namespace funky_backend {
 
       int handle_fpga_requests()
       {
-        auto num = funky_backend::handle_fpga_requests(m_thr_info.hv, &m_fpga_context, fpga_sync_flag);
-
+        auto num = funky_backend::handle_fpga_requests(m_thr_info.hv, &m_fpga_context);
         return num;
       }
 
       bool is_fpga_updated()
       {
-        // TODO: develop here
-        return false;
+        return m_fpga_context.get_updated_flag();
+      }
+
+      /* return true if FPGA is at a sync point */
+      bool check_sync_point()
+      {
+        return m_fpga_context.get_sync_flag();
       }
 
       std::vector<uint8_t>& save_fpga()
       {
-        // TODO: 
-        // 1. pass m_save_data to XoclContext
-        // 2. XoclContext calculates total data size and resize m_save_data
-        // 3. copy data
+        return m_fpga_context.save_fpga_memory();
+      }
 
-        /* calculate total data size */
-        size_t bytes = 128;
+      bool load_fpga()
+      {
+        if(m_thr_info.mig_data==NULL)
+          return false;
 
-        /* copy data */
-        m_save_data.resize(bytes, 0xab);
+        auto ret = m_fpga_context.load_fpga_memory(
+            m_thr_info.hv, 
+            m_thr_info.mig_data, 
+            m_thr_info.mig_size);
 
-        return m_save_data;
+        std::free(m_thr_info.mig_data);
+        return ret;
+      }
+
+      void sync_fpga_memory()
+      {
+        m_fpga_context.sync_shared_buffers();
       }
 
       bool handle_migration_requests(void)
@@ -241,11 +250,6 @@ namespace funky_backend {
         return msg_write_queue.push(msg);
       }
 
-      bool is_fpga_synced()
-      {
-        return fpga_sync_flag;
-      }
-
       void* get_thr_info()
       {
         return (void *)&m_thr_info;
@@ -254,11 +258,9 @@ namespace funky_backend {
     private:
       struct fpga_thr_info m_thr_info;
       funky_backend::XoclContext m_fpga_context;
-      // std::thread m_worker;
       std::vector<uint8_t> m_save_data; 
       buffer::Reader<struct thr_msg> msg_read_queue;
       buffer::Writer<struct thr_msg> msg_write_queue;
-
       bool fpga_sync_flag;
 
   }; // Worker

@@ -40,10 +40,7 @@ int allocate_fpga(void* wr_queue_addr, void* rd_queue_addr) {
     return -1;
   }
 
-  void* mig_data = NULL;
-  size_t mig_size = 0;
-
-  bk_context = std::make_unique<funky_backend::XoclContext>(wr_queue_addr, rd_queue_addr, mig_data, mig_size);
+  bk_context = std::make_unique<funky_backend::XoclContext>(wr_queue_addr, rd_queue_addr);
   return 0;
 }
 
@@ -73,8 +70,7 @@ int reconfigure_fpga(void* bin, size_t bin_size)
 
 int handle_fpga_requests(struct ukvm_hv *hv)
 {
-  bool dummy=false;
-  return funky_backend::handle_fpga_requests(hv, bk_context.get(), dummy);
+  return funky_backend::handle_fpga_requests(hv, bk_context.get());
 }
 
 
@@ -85,7 +81,7 @@ std::unique_ptr<buffer::Writer<struct thr_msg>> msg_write_queue;
 
 void create_fpga_worker(struct fpga_thr_info thr_info)
 {
-  std::cout << "UKVM: create a worker thread..." << std::endl;
+  // std::cout << "UKVM: create a worker thread..." << std::endl;
 
   msg_read_queue  = std::make_unique<buffer::Reader<struct thr_msg>>(MSG_QUEUE_MAX_CAPACITY);
   msg_write_queue = std::make_unique<buffer::Writer<struct thr_msg>>(MSG_QUEUE_MAX_CAPACITY);
@@ -94,8 +90,9 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
   {
     funky_backend::Worker worker(thr_info, rq_addr, wq_addr);
     
-    /* reconfigure FPGA */
+    /* reconfigure FPGA & load FPGA memory from migration file (if mig_file exists) */
     worker.reconfigure_fpga();
+    worker.load_fpga();
 
     /* inform another thread that Worker has been initialized */
     struct thr_msg init_msg = {MSG_INIT, NULL, 0};
@@ -109,56 +106,64 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
      * The saved data is sent to the monitor and the monitor writes data into a file. 
      * 
      * */
-    while(true)
-    {
+    auto req = worker.recv_msg();
+    while(req == nullptr) {
+      worker.handle_fpga_requests();
+      req = worker.recv_msg();
+    }
+
+    /* 
+     * start VM (FPGA) migration 
+     * */
+    //std::cout << "UKVM worker: start FPGA migration... \n";
+
+    if(req->msg_type != MSG_SAVEFPGA)
+      std::cout << "Warning: msg_type is not SAVEFPGA! \n";
+
+    /* handle incoming FPGA requests until a sync point (e.g., just after clFinish()) */
+    while(!worker.check_sync_point())
       worker.handle_fpga_requests();
 
-      /* Try to catch migration requests from Monitor */
-      auto req = worker.recv_msg();
-      if(req == nullptr)
-        continue;
+    /* 
+     * Write back OpenCL memory objects with CL_MEM_USE_HOST_PTR flag to guest memory 
+     *
+     * If any memory object is initialized with 'CL_MEM_USE_HOST_PTR' flag, 
+     * the app and the FPGA share the same memory space i.e., memory 
+     * referenced by host_ptr is used as the storage bits for the memory object.
+     * Because host_ptr is within the guest VM memory space, object data on FPGA 
+     * must be written back in the guest memory before starting to save VM contexts. 
+     *
+     * */
+    worker.sync_fpga_memory();
 
-      
-      /* Start migration */
-      std::cout << "UKVM worker: start FPGA migration... \n";
+    /* send 'synced' msg to Monitor */
+    struct thr_msg sync_msg = {MSG_SYNCED, NULL, 0};
+    worker.send_msg(sync_msg);
 
-      if(req->msg_type != MSG_SAVEFPGA)
-        std::cout << "Warning: msg_type is not SAVEFPGA! \n";
+    if(worker.is_fpga_updated()) {
+      // std::cout << "UKVM worker: saving FPGA data... \n";
 
+      /* send 'updated' msg to vCPU */
+      auto p_thr_info = worker.get_thr_info();
+      struct thr_msg updated_msg = {MSG_UPDATED, p_thr_info, sizeof(struct fpga_thr_info)};
+      worker.send_msg(updated_msg);
 
-      /* handle incoming FPGA requests until a sync point */
-      while(worker.is_fpga_synced()==false)
-        worker.handle_fpga_requests();
+      /* save FPGA data (Meanwhile, vCPU is performing savevm()) */
+      auto save_data = worker.save_fpga(); 
 
-      /* send 'synced' msg to Monitor */
-      struct thr_msg sync_msg = {MSG_SYNCED, NULL, 0};
-      worker.send_msg(sync_msg);
+      /* send FPGA data to vCPU */
+      struct thr_msg data_msg = {MSG_SAVED, save_data.data(), save_data.size()};
+      worker.send_msg(data_msg);
 
-      if(worker.is_fpga_updated()) {
-        std::cout << "UKVM worker: saving FPGA data... \n";
-
-        /* send 'updated' msg to vCPU */
-        auto p_thr_info = worker.get_thr_info();
-        struct thr_msg updated_msg = {MSG_UPDATED, p_thr_info, sizeof(struct fpga_thr_info)};
-        worker.send_msg(updated_msg);
-
-        /* save FPGA data (Meanwhile, vCPU is performing savevm()) */
-        auto save_data = worker.save_fpga(); 
-
-        std::cout << "UKVM worker: sending data to vCPU... addr:" 
-          << save_data.data() << ", size: " << save_data.size() << "\n";
-
-        /* send FPGA data to vCPU */
-        struct thr_msg data_msg = {MSG_SAVED, save_data.data(), save_data.size()};
-        worker.send_msg(data_msg);
-      }
-      else {
-        std::cout << "UKVM worker: there's no data to be saved on FPGA. \n";
-
-        auto p_thr_info = worker.get_thr_info();
-        struct thr_msg init_msg = {MSG_INIT, p_thr_info, sizeof(struct fpga_thr_info)};
-        worker.send_msg(init_msg);
-      }
+      /* wait for being destroyed by vCPU */
+      // TODO: check when save_data is released. 
+      while(true);
+    }
+    else {
+      // std::cout << "UKVM worker: there's no data to be saved on FPGA. \n";
+      auto p_thr_info = worker.get_thr_info();
+      struct thr_msg init_msg = {MSG_INIT, p_thr_info, sizeof(struct fpga_thr_info)};
+      worker.send_msg(init_msg);
     }
   };
 

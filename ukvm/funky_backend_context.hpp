@@ -22,6 +22,17 @@
 namespace funky_backend {
 
   class XoclContext {
+    public:
+      struct memobj_header
+      {
+        int mem_id;
+        ukvm_gpa_t gpa;
+        size_t mem_size;
+        cl_mem_object_type mem_type;
+        cl_mem_flags mem_flags;
+        bool onfpga_flag; //if true, data needs to be copied from src FPGA mem to dest FPGA mem
+      };
+
     private:
       buffer::Reader<funky_msg::request>  request_q;
       buffer::Writer<funky_msg::response> response_q;
@@ -37,11 +48,22 @@ namespace funky_backend {
 
       // TODO: consider cl::Pipe, cl::Image
       std::map<int, cl::Buffer> buffers;
+      std::map<int, bool> buffer_onfpga_flags;
+      std::map<int, ukvm_gpa_t> buffer_gpas;
+
       // TODO: cl::Event
 
+      // for migration
+      std::vector<uint8_t> mig_save_data;
+      bool sync_flag;
+      bool updated_flag;
+
     public:
-      XoclContext(void* wr_queue_addr, void* rd_queue_addr, void* mig_data, size_t mig_size) 
-        : request_q(wr_queue_addr), response_q(rd_queue_addr), bin_guest_addr(0), bin_size(0)
+      XoclContext(void* wr_queue_addr, void* rd_queue_addr) 
+        : request_q(wr_queue_addr), 
+          response_q(rd_queue_addr), 
+          bin_guest_addr(0), bin_size(0), 
+          mig_save_data(0), sync_flag(true), updated_flag(false)
       {
         cl_int err;
 
@@ -59,9 +81,6 @@ namespace funky_backend {
         // Creating Context and Command Queue for selected Device
         OCL_CHECK(err, context = cl::Context(device, NULL, NULL, NULL, &err));
         OCL_CHECK(err, queue = cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err));
-
-        if(mig_data)
-          std::cout << "TODO (migration): load FPGA context here!!! \n";
       }
 
       ~XoclContext()
@@ -104,12 +123,17 @@ namespace funky_backend {
       /**
        * create buffer in global memory 
        */
-      void create_buffer(int mem_id, uint64_t mem_flags, size_t size, void* host_ptr)
+      void create_buffer(int mem_id, uint64_t mem_flags, size_t size, void* host_ptr, void* gpa)
       {
         cl_int err;
 
         OCL_CHECK(err,  buffers.emplace(mem_id, cl::Buffer(context, (cl_mem_flags) mem_flags, size, host_ptr, &err)));
-        // std::cout << "Succeeded to create buffer " << mem_id << std::endl;
+       // std::cout << "Succeeded to create buffer " << mem_id << std::endl;
+        
+        buffer_onfpga_flags.emplace(mem_id, false);
+        buffer_gpas.emplace(mem_id, (ukvm_gpa_t) gpa);
+        sync_flag = false;
+        updated_flag = true;
       }
 
       int get_created_buffer_num()
@@ -118,7 +142,7 @@ namespace funky_backend {
       }
 
       /* create a new kernel */
-      // TODO: return the kernel instance itself. 
+      // TODO: return the kernel instance itself?
       // set_arg() and create_kernel() will be also changed to use the instance as an argument
       void create_kernel(const char* kernel_name)
       {
@@ -126,7 +150,6 @@ namespace funky_backend {
 
         // TODO: search for the kernel map and if the same kernel already exists, skip the creation and use the existing one. 
 
-        // OCL_CHECK(err, kernels[id] = cl::Kernel(program, kernel_name, &err));
         /* use kernel name as an index */
         OCL_CHECK(err, kernels.emplace(kernel_name, cl::Kernel(*program, kernel_name, &err)));
       }
@@ -140,7 +163,7 @@ namespace funky_backend {
         auto id = kernel_name;
 
         if(arg->mem_id == -1) {
-          /* set variables other than OpenCL memory objects */
+          /* variables other than OpenCL memory objects */
           if(src == nullptr) {
             std::cout << "arg addr error." << std::endl;
             return;
@@ -149,8 +172,11 @@ namespace funky_backend {
           OCL_CHECK(err, err = kernels[id].setArg(arg->index, arg->size, (const void*)src));
         }
         else {
-          /* set OpenCL memory objects as arguments */
+          /* OpenCL memory objects */
           OCL_CHECK(err, err = kernels[id].setArg(arg->index, buffers[arg->mem_id]));
+
+          /* Memory objects specified as kernel arguments must be on FPGA */
+          buffer_onfpga_flags[arg->mem_id] = true;
         }
       }
 
@@ -166,6 +192,9 @@ namespace funky_backend {
         // For HLS kernels global and local size is always (1,1,1). So, it is recommended
         // to always use enqueueTask() for invoking HLS kernel
         OCL_CHECK(err, err = queue.enqueueTask(kernels[id]));
+
+        sync_flag = false;
+        updated_flag = true;
       }
 
       /**
@@ -177,15 +206,20 @@ namespace funky_backend {
        */
       void enqueue_transfer(int mem_ids[], size_t id_num, uint64_t flags)
       {
-        // TODO: error if buffers[i] does not exist
-        cl_int err;
         for(size_t i=0; i<id_num; i++)
         {
+          // TODO: consider when enqueueReadBuffer or enqueueWriteBuffer is called
+          cl_int err;
           auto id = mem_ids[i];
-          // std::cout << "enqueue transfer for object[" << id << "]..." << std::endl;
-          /* do the memory migration */
           OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
+
+          /* 0 means data transfers from Host to FPGA */
+          if( flags == 0 )
+            buffer_onfpga_flags[id] = true;
         }
+
+        sync_flag = false;
+        updated_flag = true;
       }
 
       /**
@@ -194,17 +228,155 @@ namespace funky_backend {
       void sync_fpga()
       {
         queue.finish();
+        sync_flag=true;
       }
 
       /** 
        * functions for task migration 
-       *
-       * TODO: design a hw_context class for migration and move this function to that??
        */
       void save_bitstream(uint64_t addr, size_t size)
       {
         bin_guest_addr = addr;
         bin_size = size;
+      }
+
+      bool get_sync_flag()
+      {
+        return sync_flag;
+      }
+
+      bool get_updated_flag()
+      {
+        return updated_flag;
+      }
+
+      void sync_shared_buffers()
+      {
+        for(auto it : buffers)
+        {
+          auto id = it.first;
+          auto buffer = it.second;
+
+          cl_mem_flags mem_flags;
+          buffer.getInfo(CL_MEM_FLAGS, &(mem_flags));
+
+          /* data transfer from FPGA to Host */
+          if( (mem_flags & CL_MEM_USE_HOST_PTR) && buffer_onfpga_flags[id] ) {
+            cl_int err;
+            OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffer}, CL_MIGRATE_MEM_OBJECT_HOST));
+          }
+        }
+
+        queue.finish();
+      }
+
+      std::vector<uint8_t>& save_fpga_memory()
+      {
+        std::vector<struct memobj_header> headers;
+        std::map<int, std::vector<uint8_t>> saved_obj;
+        size_t total_size = 0;
+
+        /* Generate memory object headers */
+        for(auto it : buffers)
+        {
+          auto id = it.first;
+
+          struct memobj_header header = {
+            id, buffer_gpas[id], 0, 0, 0, buffer_onfpga_flags[id]};
+
+          auto buffer = it.second; 
+          buffer.getInfo(CL_MEM_SIZE, &(header.mem_size));
+          buffer.getInfo(CL_MEM_TYPE, &(header.mem_type));
+          buffer.getInfo(CL_MEM_FLAGS, &(header.mem_flags));
+          // std::cout << "buffer[" << id << "]: " << std::endl
+          //   << "gpa: 0x" << std::hex << header.gpa << ", size: " << header.mem_size 
+          //   << ", type: " << header.mem_type << ", flag: " << header.mem_flags 
+          //   << ", onfpga: " << header.onfpga_flag << std::endl;
+
+          headers.emplace_back(header);
+          total_size += sizeof(struct memobj_header);
+
+          /* if CL_MEM_USE_HOST_PTR is valid, 
+           * the object is already written in guest memory */
+          if(header.mem_flags & CL_MEM_USE_HOST_PTR)
+            continue;
+
+          /* Read data on FPGA */
+          if (header.onfpga_flag) {
+            saved_obj.emplace(id, std::vector<uint8_t>(header.mem_size));
+            auto data_ptr = saved_obj.find(id)->second.data();
+
+            cl_int err;
+            OCL_CHECK(err, err = queue.enqueueReadBuffer(buffer, CL_TRUE, 0, 
+                  header.mem_size, data_ptr, nullptr, nullptr));
+            total_size += header.mem_size;
+          }
+        }
+        
+        /* Wait for data transfers from FPGA (sync) */
+        queue.finish();
+
+        /* Copy data into a single buffer */
+        mig_save_data.resize(total_size);
+        uint8_t* mig_data_ptr = mig_save_data.data();
+
+        for(auto header : headers)
+        {
+          std::memcpy((void*)mig_data_ptr, (void*)&header, sizeof(struct memobj_header));
+          mig_data_ptr += sizeof(struct memobj_header);
+
+          // TODO: data copies here are redundant?
+          auto obj = saved_obj.find(header.mem_id);
+          if(obj != saved_obj.end()) {
+            auto src_data_ptr = saved_obj.find(header.mem_id)->second.data();
+            std::memcpy(mig_data_ptr, src_data_ptr, header.mem_size);
+            mig_data_ptr += header.mem_size;
+          }
+        }
+
+        // std::cout << "total file size: " << total_size << " Bytes. (num of buffer elements: " << mig_save_data.size() << ")" << std::endl; 
+
+        return mig_save_data;
+      }
+
+      bool load_fpga_memory(struct ukvm_hv *hv, void* load_data, size_t load_data_size)
+      {
+        auto current_ptr = (uint8_t *)load_data;
+        auto end_ptr = (uint8_t *)load_data + load_data_size;
+
+        while(current_ptr < end_ptr)
+        {
+          auto h = (struct memobj_header*) current_ptr;
+          current_ptr += sizeof(struct memobj_header);
+
+          void* host_ptr = UKVM_CHECKED_GPA_P(hv, h->gpa, h->mem_size);
+          create_buffer(h->mem_id, h->mem_flags, h->mem_size, host_ptr, (void *)h->gpa);
+
+          if(h->onfpga_flag) 
+          {
+            cl_int err;
+            if(h->mem_flags & CL_MEM_USE_HOST_PTR) {
+              /* Restore data from a cache in guest memory space */
+              OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[h->mem_id]}, 0));
+            }
+            else {
+              /* Restore data from migration file */
+              OCL_CHECK(err, err = queue.enqueueWriteBuffer(buffers[h->mem_id], 
+                    CL_TRUE, 0, h->mem_size, current_ptr, nullptr, nullptr));
+              current_ptr += h->mem_size;
+            }
+          }
+
+          /* Wait for data transfers from FPGA (sync) */
+          queue.finish();
+        }
+
+        if(current_ptr != end_ptr)
+          std::cout << "Warning: read data size is not equal to the original size: " 
+            << (uint64_t) current_ptr << ", " << (uint64_t) end_ptr << std::endl;
+
+        updated_flag = true;
+        return true;
       }
 
   }; // XoclContext

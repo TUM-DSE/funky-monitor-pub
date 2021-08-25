@@ -547,14 +547,13 @@ void savefpga(struct ukvm_hv *hv)
     /* update data header */
     struct fpga_data_header header = {0};
     if(state_msg) {
-        warn("savefpga(): Worker is alive. \n");
+        // warn("savefpga(): Worker is alive. \n");
         header.sb_fpgainit = 1;
     }
 
     if(data_msg) {
-        warnx("savefpga(): got FPGA data, %lu Bytes at 0x%08lx\n", (uint64_t) data_msg->data, data_msg->size);
-        header.sb_fpgadata = 1;
-        header.size = data_msg->size;
+        // warnx("savefpga(): got FPGA data, %lu Bytes at 0x%08lx\n", data_msg->size, (uint64_t) data_msg->data);
+        header.data_size = data_msg->size;
     }
 
     /* open file */
@@ -565,7 +564,6 @@ void savefpga(struct ukvm_hv *hv)
     }
     off_t offset = lseek(fd, 0, SEEK_END);
     warnx("savefpga(): file is seeked to %lu\n", offset);
-
 
     /* write FPGA data header */
     size_t nbytes = write(fd, &header, sizeof(struct fpga_data_header));
@@ -591,8 +589,6 @@ void savefpga(struct ukvm_hv *hv)
             return;
         }
     }
-
-    warnx("savefpga(): total file size is %lu\n", offset + nbytes);
 
     if(state_msg)
         destroy_fpga_worker();
@@ -642,8 +638,8 @@ void loadfpga(char *load_file, long offset, struct ukvm_hv *hv)
     }
 
     /* read FPGA data */
-    if(header.sb_fpgadata) {
-        size_t data_size = header.size;
+    if(header.data_size > 0) {
+        size_t data_size = header.data_size;
         void* fpga_data = malloc(data_size);
 
         ret = read(fd, fpga_data, data_size);

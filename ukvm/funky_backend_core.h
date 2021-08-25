@@ -50,10 +50,8 @@ struct thr_msg {
 };
 
 struct fpga_data_header {
-  unsigned long size: 60;
-  unsigned int reserved: 2;
   unsigned int sb_fpgainit: 1; // status bit
-  unsigned int sb_fpgadata: 1;
+  unsigned long data_size: 63;
 };
 
 #define MSG_QUEUE_MAX_CAPACITY 8
