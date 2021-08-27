@@ -9,10 +9,12 @@
 #include <stdint.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <arpa/inet.h>
 
-#define FRONT_SOCK "/tmp/front.sock"
-#define BIN_PATH_LEN 24
-#define MAX_EVENTS 10
+#define FRONT_SOCK	"/tmp/front.sock"
+#define BIN_PATH_LEN	24
+#define MAX_EVENTS	10
+#define NODES_PORT	4217
 
 enum task_state {
 	ready = 0,
@@ -46,6 +48,17 @@ struct thr_data {
 	int efd;
 };
 
+static char *strdup(const char *s)
+{
+	size_t len = strlen(s) + 1;
+	void *new = malloc(len);
+
+	if (new == NULL)
+		return NULL;
+
+	return (char *) memcpy(new, s, len);
+}
+
 static struct task *create_new_task(char *path)
 {
 	struct task *new_task;
@@ -71,129 +84,201 @@ static void *get_cmd_front(void *arg)
 	struct thr_data *td = (struct thr_data *) arg;
 	struct task *tsk_to_add = NULL;
 
-	uint64_t mpla = 17;
-
 	con = accept(td->socket, NULL, NULL);
 	if (con == -1) {
 		perror("frontend socket accept");
+		return NULL;
 	}
 
 	rc = read(con, bin_path, BIN_PATH_LEN);
 	if (rc <= 0) {
 		fprintf(stderr, "Read from peer failed");
-		close(con);
+		goto exit_front;
 	}
 	/* Make sure we do not read rubbish, old commands etc */
 	bin_path[(rc > BIN_PATH_LEN) ? BIN_PATH_LEN - 1: rc] = '\0';
 
 	printf("New binary at %s\n", bin_path);
 	tsk_to_add = create_new_task(bin_path);
-	if (!tsk_to_add)
+	if (!tsk_to_add) {
 		fprintf(stderr, "Could not create new task\n");
+		goto exit_front;
+	}
 
 	rc = write(td->efd, &tsk_to_add, sizeof(uint64_t));
 	if (rc < 0)
 		perror("write new task in eventfd");
 
+exit_front:
 	close(con);
+	return NULL;
+}
+
+static int setup_socket(int domain, int epollfd)
+{
+	int sock, rc;
+	struct epoll_event ev;
+
+	sock = socket(domain, SOCK_STREAM, 0);
+	if (sock == -1) {
+		fprintf(stderr, "socket error %d\n", errno);
+		return -1;;
+	}
+
+	if (domain == AF_UNIX) {
+		struct sockaddr_un saddr_un = {0};
+
+		saddr_un.sun_family = AF_UNIX;
+		strcpy(saddr_un.sun_path, FRONT_SOCK);
+		unlink(FRONT_SOCK);
+		rc = bind(sock, (struct sockaddr *) &saddr_un,
+				sizeof(struct sockaddr_un));
+	} else if (domain == AF_INET) {
+		struct sockaddr_in saddr_in = {0};
+
+		saddr_in.sin_family = AF_INET;
+		saddr_in.sin_addr.s_addr = htonl(INADDR_ANY);;
+		saddr_in.sin_port = htons(NODES_PORT);
+		rc = bind(sock, (struct sockaddr *) &saddr_in,
+				sizeof(struct sockaddr_in));
+	} else {
+		fprintf(stderr, "Invalid domain\n");
+		goto err_set;
+	}
+
+	if (rc == -1) {
+		perror("socket bind");
+		goto err_set;
+	}
+
+	rc = listen(sock, MAX_EVENTS - 1);
+	if (rc == -1) {
+		perror("Socket listen");
+		goto err_set;
+	}
+
+	ev.events = EPOLLIN | EPOLLET;
+	ev.data.fd = sock;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sock, &ev) == -1) {
+		perror("epoll_ctl: frontend socket");
+		goto err_set;
+	}
+
+	return sock;
+
+err_set:
+	close(sock);
+	return -1;
+}
+
+static int handle_event(int fd, int fsock, int nsock, int epollfd,
+			struct task **tsk, struct node *nd)
+{
+	int rc;
+	pthread_t worker;
+
+	if (fd == fsock) {
+		struct thr_data worker_data;
+		struct epoll_event ev;
+
+		rc = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+		if (rc < 0) {
+			perror("Eventfd for frontend socket");
+			return -1;
+		}
+
+		worker_data.socket = fsock;
+		worker_data.efd = rc;
+		ev.events = EPOLLIN | EPOLLET;
+		ev.data.fd = rc;
+		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, rc, &ev) == -1) {
+			perror("epoll_ctl: eventfd");
+			return -1;
+		}
+
+		rc = pthread_create(&worker, NULL, get_cmd_front,
+				   (void *) &worker_data);
+		if (rc) {
+			perror("Frontend worker create");
+			return -1;
+		}
+
+	} else if (fd == nsock) {
+		printf("new connection in node socket\n");
+	} else {
+		uint64_t eeval;
+
+		rc = read(fd, &eeval, sizeof(uint64_t));
+		if (rc < 0) {
+			perror("Rread eventfd");
+			return -1;;
+		}
+		*tsk = (struct task *) eeval;
+		return 1;
+	}
+
+	return 0;
 }
 
 int main()
 {
-	uint32_t nr_tsks = 0, nr_efds = 0;
+	uint32_t nr_tsks = 0;
 	struct task *tsk_to_add = NULL;
 	struct task *tsk_head = NULL, *tsk_last = NULL;
-	struct epoll_event ev, events[MAX_EVENTS];
-	int rc, epoll_ret, epollfd, front_sock, efds[MAX_EVENTS - 1];
-	struct sockaddr_un front_sockaddr;
+	struct epoll_event events[MAX_EVENTS];
+	int rc, epoll_ret, epollfd, front_sock, nodes_sock;
 	struct task *tmp;
-	uint64_t eeval;
-
-	front_sock = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (front_sock == -1) {
-		fprintf(stderr, "socket error %d\n", errno);
-	}
-
-	front_sockaddr.sun_family = AF_UNIX;
-	strcpy(front_sockaddr.sun_path, FRONT_SOCK);
-	unlink(FRONT_SOCK);
-	rc = bind(front_sock, (struct sockaddr *) &front_sockaddr,
-		  sizeof(struct sockaddr_un));
-	if (rc == -1) {
-		perror("socket bind");
-		goto out_soc;
-	}
-
-	rc = listen(front_sock, MAX_EVENTS - 1);
-	if (rc == -1) {
-		perror("Frontend socket listen");
-		goto out_soc;
-	}
 
 	epollfd = epoll_create1(0);
 	if (epollfd == -1) {
 		perror("epoll_create1");
-		goto out_soc;
+		exit(EXIT_FAILURE);
 	}
 
-	ev.events = EPOLLIN | EPOLLET;
-	ev.data.fd = front_sock;
-	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, front_sock, &ev) == -1) {
-		perror("epoll_ctl: frontend socket");
-		goto out_pol;
+	front_sock = setup_socket(AF_UNIX, epollfd);
+	if (front_sock < 0) {
+		fprintf(stderr, "Could not setup_socketup frontend socket\n");
+		goto fail_pol;
+	}
+
+	nodes_sock = setup_socket(AF_INET, epollfd);
+	if (front_sock < 0) {
+		fprintf(stderr, "Could not setup_socketup frontend socket\n");
+		goto fail_soc;
 	}
 
 	printf("Listesning commands at %s\n", FRONT_SOCK);
 
 	while(1) {
 		int i;
-		pthread_t worker;
 
 		epoll_ret = epoll_wait(epollfd, events, MAX_EVENTS, -1);
 		if (epoll_ret == -1) {
 			perror("epoll_wait");
-			goto out_pol;
+			goto fail_socs;
 		}
 
 		for (i = 0; i < epoll_ret; i++) {
 			if (events[i].events == 0)
 				continue;
-			if (events[i].data.fd == front_sock) {
-				struct thr_data worker_data;
-
-				rc = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-				if (rc < 0) {
-					perror("Eventfd for frontend socket");
-					goto out_pol;
-				}
-
-				worker_data.socket = front_sock;
-				worker_data.efd = rc;
-				ev.events = EPOLLIN | EPOLLET;
-				ev.data.fd = rc;
-				if (epoll_ctl(epollfd, EPOLL_CTL_ADD, rc, &ev) == -1) {
-					perror("epoll_ctl: eventfd");
-					goto out_pol;
-				}
-
-				rc = pthread_create(&worker, NULL, get_cmd_front,
-						   (void *) &worker_data);
-				if (rc) {
-					perror("Frontend worker create");
-					goto out_pol;
-				}
-			} else {
-				rc = read(events[i].data.fd, &eeval, sizeof(uint64_t));
-				if (rc < 0) {
-					perror("Rread eventfd");
-					goto out_pol;
-				}
-				tsk_to_add = (struct task *) eeval;
+			rc = handle_event(events[i].data.fd, front_sock,
+					  nodes_sock, epollfd,
+					  &tsk_to_add, NULL);
+			switch(rc) {
+			case 0:
+				continue;
+			case 1:
 				tsk_to_add->id = nr_tsks++;
-				if (close(events[i].data.fd) == -1)
-					perror("Close eventfd");
+				break;
+			case 2:
+				printf("new node\n");
+				break;
+			default:
+				fprintf(stderr, "Error while handling event\n");
+				close(events[i].data.fd);
+				goto fail_socs;
 			}
-
+			close(events[i].data.fd);
 		}
 		if (!tsk_to_add)
 			continue;
@@ -215,9 +300,11 @@ int main()
 
 	return 0;
 
-out_pol:
-	close(epollfd);
-out_soc:
+fail_socs:
+	close(nodes_sock);
+fail_soc:
 	close(front_sock);
+fail_pol:
+	close(epollfd);
 	exit(EXIT_FAILURE);
 }
