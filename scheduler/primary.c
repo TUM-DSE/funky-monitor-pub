@@ -43,6 +43,20 @@ struct node {
 	enum node_state state;
 };
 
+enum msg_type {
+	task_new = 0,
+	node_new,
+	node_ret
+};
+
+struct notify_msg {
+	enum msg_type type;
+	union {
+		struct task *tsk;
+		struct node *nod;
+	};
+};
+
 struct thr_data {
 	int socket;
 	int efd;
@@ -83,6 +97,7 @@ static void *get_cmd_front(void *arg)
 	char bin_path[BIN_PATH_LEN];
 	struct thr_data *td = (struct thr_data *) arg;
 	struct task *tsk_to_add = NULL;
+	struct notify_msg *nmsg = NULL;
 
 	con = accept(td->socket, NULL, NULL);
 	if (con == -1) {
@@ -105,7 +120,16 @@ static void *get_cmd_front(void *arg)
 		goto exit_front;
 	}
 
-	rc = write(td->efd, &tsk_to_add, sizeof(uint64_t));
+	nmsg = malloc(sizeof(struct notify_msg));
+	if (!nmsg) {
+		fprintf(stderr, "Out of memory for notify msg\n");
+		free(tsk_to_add);
+		goto exit_front;
+	}
+	nmsg->type = task_new;
+	nmsg->tsk = tsk_to_add;
+
+	rc = write(td->efd, &nmsg, sizeof(uint64_t));
 	if (rc < 0)
 		perror("write new task in eventfd");
 
@@ -207,13 +231,18 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 		printf("new connection in node socket\n");
 	} else {
 		uint64_t eeval;
+		struct notify_msg *new_msg;
 
 		rc = read(fd, &eeval, sizeof(uint64_t));
 		if (rc < 0) {
-			perror("Rread eventfd");
+			perror("Read eventfd");
 			return -1;;
 		}
-		*tsk = (struct task *) eeval;
+		new_msg = (struct notify_msg *) eeval;
+		if (new_msg->type == task_new) {
+			*tsk = new_msg->tsk;
+		}
+		free(new_msg);
 		return 1;
 	}
 
