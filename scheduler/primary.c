@@ -37,10 +37,11 @@ struct task {
 };
 
 struct node {
-	/*
-	 * Communication data like ip, socket etc;
-	 */
+	uint32_t id;
+	pthread_t thr;
+	int ev_fd;
 	enum node_state state;
+	struct node *next;
 };
 
 enum msg_type {
@@ -59,7 +60,8 @@ struct notify_msg {
 
 struct thr_data {
 	int socket;
-	int efd;
+	int rcv_efd;
+	int snd_efd;
 };
 
 static char *strdup(const char *s)
@@ -129,12 +131,41 @@ static void *get_cmd_front(void *arg)
 	nmsg->type = task_new;
 	nmsg->tsk = tsk_to_add;
 
-	rc = write(td->efd, &nmsg, sizeof(uint64_t));
+	rc = write(td->snd_efd, &nmsg, sizeof(uint64_t));
 	if (rc < 0)
 		perror("write new task in eventfd");
 
 exit_front:
 	close(con);
+	free(td);
+	return NULL;
+}
+
+static void *node_communication(void *arg)
+{
+	int con, rc;
+	struct thr_data *td = (struct thr_data *) arg;
+	struct task *tsk;
+	uint64_t efval;
+	//struct notify_msg *nmsg = NULL;
+
+	con = accept(td->socket, NULL, NULL);
+	if (con == -1) {
+		perror("node socket accept");
+		return NULL;
+	}
+
+	rc = read(td->rcv_efd, &efval, sizeof(uint64_t));
+	if (rc < sizeof(uint64_t)) {
+		fprintf(stderr, "Read from eventfd failed");
+		goto exit_node;
+	}
+	tsk = (struct task *) efval;
+
+	printf("New binary with id %d will run\n", tsk->id);
+exit_node:
+	close(con);
+	free(td);
 	return NULL;
 }
 
@@ -196,23 +227,29 @@ err_set:
 }
 
 static int handle_event(int fd, int fsock, int nsock, int epollfd,
-			struct task **tsk, struct node *nd)
+			struct task **tsk, struct node **nd)
 {
 	int rc;
 	pthread_t worker;
 
 	if (fd == fsock) {
-		struct thr_data worker_data;
+		struct thr_data *worker_data;
 		struct epoll_event ev;
 
+		worker_data = malloc(sizeof(struct thr_data));
+		if (!worker_data) {
+			fprintf(stderr, "Out of memory for worker data\n");
+			return -1;
+		}
 		rc = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 		if (rc < 0) {
 			perror("Eventfd for frontend socket");
 			return -1;
 		}
 
-		worker_data.socket = fsock;
-		worker_data.efd = rc;
+		worker_data->socket = fsock;
+		worker_data->rcv_efd = -1;
+		worker_data->snd_efd = rc;
 		ev.events = EPOLLIN | EPOLLET;
 		ev.data.fd = rc;
 		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, rc, &ev) == -1) {
@@ -221,14 +258,63 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 		}
 
 		rc = pthread_create(&worker, NULL, get_cmd_front,
-				   (void *) &worker_data);
+				   (void *) worker_data);
 		if (rc) {
 			perror("Frontend worker create");
 			return -1;
 		}
 
 	} else if (fd == nsock) {
-		printf("new connection in node socket\n");
+		struct thr_data *worker_data;
+		struct epoll_event ev;
+		struct node *new_node;
+
+		worker_data = malloc(sizeof(struct thr_data));
+		if (!worker_data) {
+			fprintf(stderr, "Out of memory for worker data\n");
+			return -1;
+		}
+		worker_data->socket = nsock;
+		rc = eventfd(0, EFD_CLOEXEC);
+		if (rc < 0) {
+			perror("Eventfd for frontend socket");
+			return -1;
+		}
+		worker_data->rcv_efd = rc;
+
+		rc = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+		if (rc < 0) {
+			perror("Eventfd for frontend socket");
+			return -1;
+		}
+		worker_data->snd_efd = rc;
+
+		ev.events = EPOLLIN | EPOLLET;
+		ev.data.fd = rc;
+		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, rc, &ev) == -1) {
+			perror("epoll_ctl: eventfd");
+			return -1;
+		}
+
+		rc = pthread_create(&worker, NULL, node_communication,
+				   (void *) worker_data);
+		if (rc) {
+			perror("Frontend worker create");
+			return -1;
+		}
+
+		new_node = malloc(sizeof(struct node));
+		if (!new_node) {
+			fprintf(stderr, "Out of memory for new node\n");
+			/* TODO: close connection and destroy thread */
+			return -1;
+		}
+		new_node->thr = rc;
+		new_node->ev_fd = worker_data->rcv_efd;
+		new_node->state = available;
+		*nd = new_node;
+		return 1;
+
 	} else {
 		uint64_t eeval;
 		struct notify_msg *new_msg;
@@ -243,7 +329,7 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			*tsk = new_msg->tsk;
 		}
 		free(new_msg);
-		return 1;
+		return 2;
 	}
 
 	return 0;
@@ -253,10 +339,13 @@ int main()
 {
 	uint32_t nr_tsks = 0;
 	struct task *tsk_to_add = NULL;
+	struct node *node_to_add = NULL;
+	struct node *node_head = NULL, *node_last = NULL;
 	struct task *tsk_head = NULL, *tsk_last = NULL;
 	struct epoll_event events[MAX_EVENTS];
-	int rc, epoll_ret, epollfd, front_sock, nodes_sock;
-	struct task *tmp;
+	int rc = 0, epoll_ret, epollfd, front_sock, nodes_sock;
+	struct task *tsk_tmp;
+	struct node *node_tmp;
 
 	epollfd = epoll_create1(0);
 	if (epollfd == -1) {
@@ -292,15 +381,30 @@ int main()
 				continue;
 			rc = handle_event(events[i].data.fd, front_sock,
 					  nodes_sock, epollfd,
-					  &tsk_to_add, NULL);
+					  &tsk_to_add, &node_to_add);
 			switch(rc) {
 			case 0:
 				continue;
 			case 1:
-				tsk_to_add->id = nr_tsks++;
-				break;
+				if (node_head == NULL) {
+					node_to_add->id = 0;
+					node_head = node_last = node_to_add;
+				} else {
+					node_to_add->id = node_last->id + 1;
+					node_last->next = node_to_add;
+					node_last = node_to_add;
+				}
+				node_to_add = NULL;
+				continue;
 			case 2:
-				printf("new node\n");
+				tsk_to_add->id = nr_tsks++;
+				if (tsk_head == NULL) {
+					tsk_head = tsk_last = tsk_to_add;
+				} else {
+					tsk_last->next = tsk_to_add;
+					tsk_last = tsk_to_add;
+				}
+				tsk_to_add = NULL;
 				break;
 			default:
 				fprintf(stderr, "Error while handling event\n");
@@ -309,22 +413,40 @@ int main()
 			}
 			close(events[i].data.fd);
 		}
-		if (!tsk_to_add)
+		if (rc == 0)
 			continue;
 
-		if (tsk_head == NULL) {
-			tsk_head = tsk_last = tsk_to_add;
-		} else {
-			tsk_last->next = tsk_to_add;
-			tsk_last = tsk_to_add;
+		node_tmp = node_head;
+		while(node_tmp) {
+			printf("Node with id %d state %d\n", node_tmp->id, node_tmp->state);
+			node_tmp = node_tmp->next;
 		}
-		tsk_to_add = NULL;
+		tsk_tmp = tsk_head;
+		while(tsk_tmp) {
+			printf("Task with id %d with state %d and bin at %s\n", tsk_tmp->id,tsk_tmp->state , tsk_tmp->bin_path);
+			tsk_tmp = tsk_tmp->next;
+		}
+		node_tmp = node_head;
+		while(node_tmp) {
+			if (node_tmp->state == available)
+				break;
+			node_tmp = node_tmp->next;
+		}
+		tsk_tmp = tsk_head;
+		while(tsk_tmp) {
+			if (tsk_tmp->state == ready)
+				break;
+			tsk_tmp = tsk_tmp->next;
+		}
+		if (!tsk_tmp || !node_tmp)
+			continue;
+		tsk_tmp->state = running;
+		node_tmp->state = busy;
+		rc = write(node_tmp->ev_fd, &tsk_tmp, sizeof(uint64_t));
+		if (rc < sizeof(uint64_t))
+			fprintf(stderr, "Could not write to eventfd\n");
 
-		tmp = tsk_head;
-		while(tmp) {
-			printf("Task with id %d and bin at %s\n", tmp->id, tmp->bin_path);
-			tmp = tmp->next;
-		}
+
 	}
 
 	return 0;
