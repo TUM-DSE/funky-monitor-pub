@@ -46,15 +46,15 @@ struct node {
 
 enum msg_type {
 	task_new = 0,
-	node_new,
-	node_ret
+	node_ret,
+	node_down
 };
 
 struct notify_msg {
 	enum msg_type type;
 	union {
 		struct task *tsk;
-		struct node *nod;
+		pthread_t thr;
 	};
 };
 
@@ -143,29 +143,92 @@ exit_front:
 
 static void *node_communication(void *arg)
 {
-	int con, rc;
+	int con, rc, epollfd = 0;
 	struct thr_data *td = (struct thr_data *) arg;
 	struct task *tsk;
 	uint64_t efval;
-	//struct notify_msg *nmsg = NULL;
+	struct epoll_event ev, events[2];
+	struct notify_msg *nmsg = NULL;
 
 	con = accept(td->socket, NULL, NULL);
 	if (con == -1) {
 		perror("node socket accept");
+		free(td);
 		return NULL;
 	}
 
-	rc = read(td->rcv_efd, &efval, sizeof(uint64_t));
-	if (rc < sizeof(uint64_t)) {
-		fprintf(stderr, "Read from eventfd failed");
+	epollfd = epoll_create1(0);
+	if (epollfd == -1) {
+		perror("node_communication: epoll_create1");
 		goto exit_node;
 	}
-	tsk = (struct task *) efval;
 
-	printf("New binary with id %d will run\n", tsk->id);
+	ev.events = EPOLLIN;
+	//ev.events = EPOLLIN | EPOLLET;
+	ev.data.fd = con;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, con, &ev) == -1) {
+		perror("epoll_ctl: node con socket");
+		goto exit_node;
+	}
+
+	ev.events = EPOLLIN;
+	ev.data.fd = td->rcv_efd;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, td->rcv_efd, &ev) == -1) {
+		perror("epoll_ctl: node eventfd");
+		goto exit_node;
+	}
+
+	while(1)
+	{
+		int epoll_ret, i;
+
+		epoll_ret = epoll_wait(epollfd, events, 2, -1);
+		if (epoll_ret == -1) {
+			perror("node epoll wait");
+			goto exit_node;
+		}
+
+		for (i = 0; i < epoll_ret; i++) {
+			uint8_t node_msg = 0;
+
+			if (events[i].data.fd == con) {
+				rc = read(con, &node_msg, sizeof(uint8_t));
+				if (rc == 0) {
+					printf("Connection closed\n");
+					goto exit_node;
+				} else {
+					printf("rc = %d, node_msg = %d\n", rc, (int)node_msg);
+				}
+			} else if (events[i].data.fd == td->rcv_efd) {
+				rc = read(td->rcv_efd, &efval, sizeof(uint64_t));
+				if (rc < sizeof(uint64_t)) {
+					fprintf(stderr, "Read from eventfd failed");
+					goto exit_node;
+				}
+				tsk = (struct task *) efval;
+
+				printf("New binary with id %d will run\n", tsk->id);
+			}
+		}
+	}
+
 exit_node:
 	close(con);
+	nmsg = malloc(sizeof(struct notify_msg));
+	if (!nmsg) {
+		fprintf(stderr, "Out of memory for notify msg\n");
+		goto out_node;
+	}
+	nmsg->type = node_down;
+	nmsg->thr = pthread_self();
+
+	rc = write(td->snd_efd, &nmsg, sizeof(uint64_t));
+	if (rc < 0)
+		perror("write new task in eventfd");
+out_node:
 	free(td);
+	if (epollfd)
+		close(epollfd);
 	return NULL;
 }
 
@@ -227,7 +290,7 @@ err_set:
 }
 
 static int handle_event(int fd, int fsock, int nsock, int epollfd,
-			struct task **tsk, struct node **nd)
+			struct task **tsk, struct node **nd, pthread_t *node_ref)
 {
 	int rc;
 	pthread_t worker;
@@ -309,7 +372,7 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			/* TODO: close connection and destroy thread */
 			return -1;
 		}
-		new_node->thr = rc;
+		new_node->thr = worker;
 		new_node->ev_fd = worker_data->rcv_efd;
 		new_node->state = available;
 		*nd = new_node;
@@ -318,6 +381,7 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 	} else {
 		uint64_t eeval;
 		struct notify_msg *new_msg;
+		int ret = 2;
 
 		rc = read(fd, &eeval, sizeof(uint64_t));
 		if (rc < 0) {
@@ -325,11 +389,19 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			return -1;;
 		}
 		new_msg = (struct notify_msg *) eeval;
-		if (new_msg->type == task_new) {
+		switch(new_msg->type) {
+		case task_new:
 			*tsk = new_msg->tsk;
+			break;
+		case node_down:
+			*node_ref = new_msg->thr;
+			ret = 3;
+			break;
+		case node_ret:
 		}
+
 		free(new_msg);
-		return 2;
+		return ret;
 	}
 
 	return 0;
@@ -345,7 +417,7 @@ int main()
 	struct epoll_event events[MAX_EVENTS];
 	int rc = 0, epoll_ret, epollfd, front_sock, nodes_sock;
 	struct task *tsk_tmp;
-	struct node *node_tmp;
+	struct node *node_tmp, *node_prev;
 
 	epollfd = epoll_create1(0);
 	if (epollfd == -1) {
@@ -369,6 +441,7 @@ int main()
 
 	while(1) {
 		int i;
+		pthread_t node_ref = 0;
 
 		epoll_ret = epoll_wait(epollfd, events, MAX_EVENTS, -1);
 		if (epoll_ret == -1) {
@@ -381,7 +454,7 @@ int main()
 				continue;
 			rc = handle_event(events[i].data.fd, front_sock,
 					  nodes_sock, epollfd,
-					  &tsk_to_add, &node_to_add);
+					  &tsk_to_add, &node_to_add, &node_ref);
 			switch(rc) {
 			case 0:
 				continue;
@@ -406,6 +479,9 @@ int main()
 				}
 				tsk_to_add = NULL;
 				break;
+			case 3:
+				printf("Node down\n");
+				break;
 			default:
 				fprintf(stderr, "Error while handling event\n");
 				close(events[i].data.fd);
@@ -427,9 +503,24 @@ int main()
 			tsk_tmp = tsk_tmp->next;
 		}
 		node_tmp = node_head;
+		node_prev = NULL;
 		while(node_tmp) {
+			if (rc == 3) {
+				if (node_tmp->thr == node_ref) {
+					if (node_tmp == node_last)
+						node_last = node_prev;
+					if (node_prev == NULL)
+						node_head = node_tmp->next;
+					else
+						node_prev->next = node_tmp->next;
+					close(node_tmp->ev_fd);
+					free(node_tmp);
+					continue;
+				}
+			}
 			if (node_tmp->state == available)
 				break;
+			node_prev = node_tmp;
 			node_tmp = node_tmp->next;
 		}
 		tsk_tmp = tsk_head;
