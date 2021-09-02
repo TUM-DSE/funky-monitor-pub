@@ -10,9 +10,13 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <arpa/inet.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/sendfile.h>
+#include <fcntl.h>
 
 #define FRONT_SOCK	"/tmp/front.sock"
-#define BIN_PATH_LEN	24
+#define BIN_PATH_LEN	254
 #define MAX_EVENTS	10
 #define NODES_PORT	4217
 
@@ -141,13 +145,97 @@ exit_front:
 	return NULL;
 }
 
+static int send_binary(struct task *tsk, int socket)
+{
+	int rc = 0, fd;
+	struct stat st;
+	ssize_t n, count = 0;
+
+	fd = open(tsk->bin_path, O_RDONLY);
+	if (fd < 0) {
+		perror("Opening binry to send it");
+		return -1;
+	}
+
+	rc = stat(tsk->bin_path, &st);
+	if (rc < 0) {
+		perror("binary size");
+		goto err_send;
+	}
+
+	rc = write(socket, &st.st_size, sizeof(off_t));
+	if (rc < sizeof(off_t)) {
+		fprintf(stderr, "Short send of binary size\n");
+		if (rc < 0)
+			perror("Send file siee");
+		goto err_send;
+	}
+
+	printf("I will deploy binary with id %d. It has size %ld\n", tsk->id, st.st_size);
+
+	while (count < st.st_size) {
+		n = sendfile(socket, fd, NULL, st.st_size - count);
+		if (n < 0) {
+			perror("Sending file");
+			goto err_send;
+		}
+		count += n;
+	}
+	return rc;
+
+err_send:
+	close(fd);
+	return -1;
+}
+
+static int handle_node_comm(int epollfd, int con, int sched_efd)
+{
+	int rc;
+	int epoll_ret, i;
+	struct epoll_event events[2];
+	struct task *tsk;
+
+	epoll_ret = epoll_wait(epollfd, events, 2, -1);
+	if (epoll_ret == -1) {
+		perror("node epoll wait");
+		return -1;;
+	}
+
+	for (i = 0; i < epoll_ret; i++) {
+		uint8_t node_msg = 0;
+
+		if (events[i].data.fd == con) {
+			rc = read(con, &node_msg, sizeof(uint8_t));
+			if (rc == 0) {
+				printf("Connection closed\n");
+				return -1;;
+			} else {
+				printf("rc = %d, node_msg = %d\n", rc, (int)node_msg);
+			}
+		} else if (events[i].data.fd == sched_efd) {
+			uint64_t efval;
+
+			rc = read(sched_efd, &efval, sizeof(uint64_t));
+			if (rc < sizeof(uint64_t)) {
+				fprintf(stderr, "Read from eventfd failed");
+				return -1;;
+			}
+			tsk = (struct task *) efval;
+
+			rc = send_binary(tsk, con);
+			if (rc < 0)
+				return -1;
+
+		}
+	}
+	return 0;
+}
+
 static void *node_communication(void *arg)
 {
 	int con, rc, epollfd = 0;
 	struct thr_data *td = (struct thr_data *) arg;
-	struct task *tsk;
-	uint64_t efval;
-	struct epoll_event ev, events[2];
+	struct epoll_event ev;
 	struct notify_msg *nmsg = NULL;
 
 	con = accept(td->socket, NULL, NULL);
@@ -164,7 +252,6 @@ static void *node_communication(void *arg)
 	}
 
 	ev.events = EPOLLIN;
-	//ev.events = EPOLLIN | EPOLLET;
 	ev.data.fd = con;
 	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, con, &ev) == -1) {
 		perror("epoll_ctl: node con socket");
@@ -180,36 +267,9 @@ static void *node_communication(void *arg)
 
 	while(1)
 	{
-		int epoll_ret, i;
-
-		epoll_ret = epoll_wait(epollfd, events, 2, -1);
-		if (epoll_ret == -1) {
-			perror("node epoll wait");
+		rc = handle_node_comm(epollfd, con, td->rcv_efd);
+		if (rc < 0)
 			goto exit_node;
-		}
-
-		for (i = 0; i < epoll_ret; i++) {
-			uint8_t node_msg = 0;
-
-			if (events[i].data.fd == con) {
-				rc = read(con, &node_msg, sizeof(uint8_t));
-				if (rc == 0) {
-					printf("Connection closed\n");
-					goto exit_node;
-				} else {
-					printf("rc = %d, node_msg = %d\n", rc, (int)node_msg);
-				}
-			} else if (events[i].data.fd == td->rcv_efd) {
-				rc = read(td->rcv_efd, &efval, sizeof(uint64_t));
-				if (rc < sizeof(uint64_t)) {
-					fprintf(stderr, "Read from eventfd failed");
-					goto exit_node;
-				}
-				tsk = (struct task *) efval;
-
-				printf("New binary with id %d will run\n", tsk->id);
-			}
-		}
 	}
 
 exit_node:
