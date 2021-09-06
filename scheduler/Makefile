@@ -1,5 +1,5 @@
 .PHONY: all
-all: primary daemon
+all: primary daemon rest
 
 SCHED_CFLAGS  := -Wall -Werror -O2 -g
 SCHED_LDFLAGS := -lpthread
@@ -10,7 +10,10 @@ primary: primary.c
 daemon: daemon.c
 	$(CC) $(SCHED_CFLAGS) -o $@ $< 
 
+rest: rest.go
+	go build rest.go
+
 .PHONY: clean
 
 clean:
-	rm -f primary daemon
+	rm -f primary daemon rest
