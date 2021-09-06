@@ -1,11 +1,11 @@
 .PHONY: all
 all: primary daemon
 
-SCHED_CFLAGS  := -Wall -Werror -std=c99 -O2 -g
+SCHED_CFLAGS  := -Wall -Werror -O2 -g
 SCHED_LDFLAGS := -lpthread
 
 primary: primary.c
-	$(CC) $(SCHED_CFLAGS) -o $@ $< $(SCHED_LDFLAGS)
+	$(CC) $(SCHED_CFLAGS) -std=c99 -o $@ $< $(SCHED_LDFLAGS)
 
 daemon: daemon.c
 	$(CC) $(SCHED_CFLAGS) -o $@ $< 

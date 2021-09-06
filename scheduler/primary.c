@@ -36,6 +36,7 @@ struct task {
 	uint32_t id;
 	char *bin_path;
 	uint32_t node_id;
+	struct node *node;
 	enum task_state state;
 	struct task *next;
 };
@@ -44,8 +45,15 @@ struct node {
 	uint32_t id;
 	pthread_t thr;
 	int ev_fd;
+	uint32_t task_id;
+	struct task *task;
 	enum node_state state;
 	struct node *next;
+};
+
+struct node_result {
+	pthread_t thr;
+	int res;
 };
 
 enum msg_type {
@@ -58,7 +66,7 @@ struct notify_msg {
 	enum msg_type type;
 	union {
 		struct task *tsk;
-		pthread_t thr;
+		struct node_result nres;
 	};
 };
 
@@ -90,6 +98,10 @@ static struct task *create_new_task(char *path)
 	}
 
 	new_task->bin_path = strdup(path);
+	if (!new_task->bin_path) {
+		free(new_task);
+		return NULL;
+	}
 	new_task->node_id = 0;
 	new_task->state = ready;
 	new_task->next = NULL;
@@ -188,7 +200,7 @@ err_send:
 	return -1;
 }
 
-static int handle_node_comm(int epollfd, int con, int sched_efd)
+static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd)
 {
 	int rc;
 	int epoll_ret, i;
@@ -202,16 +214,31 @@ static int handle_node_comm(int epollfd, int con, int sched_efd)
 	}
 
 	for (i = 0; i < epoll_ret; i++) {
-		uint8_t node_msg = 0;
+		int node_msg = 0;
 
 		if (events[i].data.fd == con) {
-			rc = read(con, &node_msg, sizeof(uint8_t));
+			struct notify_msg *nmsg = NULL;
+
+			rc = read(con, &node_msg, sizeof(int));
 			if (rc == 0) {
 				printf("Connection closed\n");
 				return -1;;
-			} else {
-				printf("rc = %d, node_msg = %d\n", rc, (int)node_msg);
+			} else if (rc < sizeof(int)) {
+				fprintf(stderr, "Short read from node's message\n");
 			}
+
+			nmsg = malloc(sizeof(struct notify_msg));
+			if (!nmsg) {
+				fprintf(stderr, "Out of memory for notify msg\n");
+				return -1;;
+			}
+			nmsg->type = node_ret;
+			nmsg->nres.thr = pthread_self();
+			nmsg->nres.res = node_msg;
+
+			rc = write(snd_efd, &nmsg, sizeof(uint64_t));
+			if (rc < 0)
+				perror("write new task in eventfd");
 		} else if (events[i].data.fd == sched_efd) {
 			uint64_t efval;
 
@@ -267,7 +294,7 @@ static void *node_communication(void *arg)
 
 	while(1)
 	{
-		rc = handle_node_comm(epollfd, con, td->rcv_efd);
+		rc = handle_node_comm(epollfd, con, td->rcv_efd, td->snd_efd);
 		if (rc < 0)
 			goto exit_node;
 	}
@@ -280,7 +307,7 @@ exit_node:
 		goto out_node;
 	}
 	nmsg->type = node_down;
-	nmsg->thr = pthread_self();
+	nmsg->nres.thr = pthread_self();
 
 	rc = write(td->snd_efd, &nmsg, sizeof(uint64_t));
 	if (rc < 0)
@@ -354,9 +381,9 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 {
 	int rc;
 	pthread_t worker;
+	struct thr_data *worker_data;
 
 	if (fd == fsock) {
-		struct thr_data *worker_data;
 		struct epoll_event ev;
 
 		worker_data = malloc(sizeof(struct thr_data));
@@ -367,28 +394,27 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 		rc = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 		if (rc < 0) {
 			perror("Eventfd for frontend socket");
-			return -1;
+			goto err_handle;
 		}
 
 		worker_data->socket = fsock;
-		worker_data->rcv_efd = -1;
+		worker_data->rcv_efd = 0;
 		worker_data->snd_efd = rc;
 		ev.events = EPOLLIN | EPOLLET;
 		ev.data.fd = rc;
 		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, rc, &ev) == -1) {
 			perror("epoll_ctl: eventfd");
-			return -1;
+			goto err_handle_ev;
 		}
 
 		rc = pthread_create(&worker, NULL, get_cmd_front,
 				   (void *) worker_data);
 		if (rc) {
 			perror("Frontend worker create");
-			return -1;
+			goto err_handle_ev;
 		}
 
 	} else if (fd == nsock) {
-		struct thr_data *worker_data;
 		struct epoll_event ev;
 		struct node *new_node;
 
@@ -398,17 +424,20 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			return -1;
 		}
 		worker_data->socket = nsock;
+		worker_data->rcv_efd = 0;
+		worker_data->snd_efd = 0;
 		rc = eventfd(0, EFD_CLOEXEC);
 		if (rc < 0) {
 			perror("Eventfd for frontend socket");
-			return -1;
+			goto err_handle;
 		}
 		worker_data->rcv_efd = rc;
 
 		rc = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 		if (rc < 0) {
 			perror("Eventfd for frontend socket");
-			return -1;
+			free(worker_data);
+			goto err_handle_ev;
 		}
 		worker_data->snd_efd = rc;
 
@@ -416,23 +445,25 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 		ev.data.fd = rc;
 		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, rc, &ev) == -1) {
 			perror("epoll_ctl: eventfd");
-			return -1;
+			goto err_handle_ev;
 		}
 
 		rc = pthread_create(&worker, NULL, node_communication,
 				   (void *) worker_data);
 		if (rc) {
 			perror("Frontend worker create");
-			return -1;
+			goto err_handle_ev;
 		}
 
 		new_node = malloc(sizeof(struct node));
 		if (!new_node) {
 			fprintf(stderr, "Out of memory for new node\n");
 			/* TODO: close connection and destroy thread */
-			return -1;
+			goto err_handle_ev;
 		}
 		new_node->thr = worker;
+		new_node->task_id = 0;
+		new_node->task = NULL;
 		new_node->ev_fd = worker_data->rcv_efd;
 		new_node->state = available;
 		*nd = new_node;
@@ -454,22 +485,96 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			*tsk = new_msg->tsk;
 			break;
 		case node_down:
-			*node_ref = new_msg->thr;
+			*node_ref = new_msg->nres.thr;
 			ret = 3;
 			break;
 		case node_ret:
+			*node_ref = new_msg->nres.thr;
+			ret = new_msg->nres.res;
+			break;
+		default:
+			fprintf(stderr, "I should not be here %s - %d\n", __func__, __LINE__);
+			exit(1);
 		}
-
 		free(new_msg);
+
 		return ret;
 	}
 
 	return 0;
+err_handle_ev:
+	if (worker_data->rcv_efd)
+		close(worker_data->rcv_efd);
+	if (worker_data->snd_efd)
+		close(worker_data->snd_efd);
+err_handle:
+	free(worker_data);
+	return -1;
 }
 
+static void remove_task(struct task **hd, struct task **lst, uint32_t id)
+{
+	struct task *task_tmp = *hd, *task_prev = NULL;
+
+	while(task_tmp) {
+		if (task_tmp->id == id) {
+			if (task_tmp == *lst)
+				*lst = task_prev;
+			if (task_prev == NULL)
+				*hd = task_tmp->next;
+			else
+				task_prev->next = task_tmp->next;
+			if (task_tmp->node)
+				task_tmp->node->state = available;
+			printf("%d ", task_tmp->id);
+			free(task_tmp->bin_path);
+			free(task_tmp);
+			return;
+		}
+		task_prev = task_tmp;
+		task_tmp = task_tmp->next;
+	}
+
+	return;
+}
+
+static void remove_node(struct node **hd, struct node **lst, pthread_t ref)
+{
+
+	struct node *node_tmp = *hd, *node_prev = NULL;
+
+	while(node_tmp) {
+		if (node_tmp->thr == ref) {
+			if (node_tmp == *lst)
+				*lst = node_prev;
+			if (node_prev == NULL)
+				*hd = node_tmp->next;
+			else
+				node_prev->next = node_tmp->next;
+			if (node_tmp->task)
+				node_tmp->task->state = ready;
+			close(node_tmp->ev_fd);
+			free(node_tmp);
+			return;
+		}
+		node_prev = node_tmp;
+		node_tmp = node_tmp->next;
+	}
+
+	return;
+}
+
+#if 0
+		} else if (rc == 4 || rc == 5) {
+			if (node_tmp->thr == node_ref) {
+				node_tmp->state = available;
+				break;
+			}
+		}
+#endif
 int main()
 {
-	uint32_t nr_tsks = 0;
+	uint32_t nr_tsks = 1;
 	struct task *tsk_to_add = NULL;
 	struct node *node_to_add = NULL;
 	struct node *node_head = NULL, *node_last = NULL;
@@ -477,7 +582,7 @@ int main()
 	struct epoll_event events[MAX_EVENTS];
 	int rc = 0, epoll_ret, epollfd, front_sock, nodes_sock;
 	struct task *tsk_tmp;
-	struct node *node_tmp, *node_prev;
+	struct node *node_tmp;
 
 	epollfd = epoll_create1(0);
 	if (epollfd == -1) {
@@ -502,6 +607,8 @@ int main()
 	while(1) {
 		int i;
 		pthread_t node_ref = 0;
+		struct task *tsk_avail = NULL;
+		struct node *node_avail = NULL;
 
 		epoll_ret = epoll_wait(epollfd, events, MAX_EVENTS, -1);
 		if (epoll_ret == -1) {
@@ -510,6 +617,7 @@ int main()
 		}
 
 		for (i = 0; i < epoll_ret; i++) {
+			printf("ksupnhsa gia %d\n", events[i].data.fd);
 			if (events[i].events == 0)
 				continue;
 			rc = handle_event(events[i].data.fd, front_sock,
@@ -520,7 +628,7 @@ int main()
 				continue;
 			case 1:
 				if (node_head == NULL) {
-					node_to_add->id = 0;
+					node_to_add->id = 1;
 					node_head = node_last = node_to_add;
 				} else {
 					node_to_add->id = node_last->id + 1;
@@ -541,7 +649,42 @@ int main()
 				break;
 			case 3:
 				printf("Node down\n");
+				remove_node(&node_head, &node_last, node_ref);
 				break;
+			case 4:
+				printf("Task with id ");
+				node_tmp = node_head;
+				while (node_tmp) {
+					if (node_tmp->thr == node_ref)
+						break;
+					node_tmp = node_tmp->next;
+
+				}
+				if (!node_tmp) {
+					fprintf(stderr, "I could not find node..\n");
+					goto fail_socs;
+				}
+
+				remove_task(&tsk_head, &tsk_last, node_tmp->task_id);
+				printf("terminated successfully\n");
+				continue;
+			case 5:
+				printf("Task with id ");
+				node_tmp = node_head;
+				while (node_tmp) {
+					if (node_tmp->thr == node_ref)
+						break;
+					node_tmp = node_tmp->next;
+
+				}
+				if (!node_tmp) {
+					fprintf(stderr, "I could not find node..\n");
+					goto fail_socs;
+				}
+
+				remove_task(&tsk_head, &tsk_last, node_tmp->task_id);
+				printf("failed\n");
+				continue;
 			default:
 				fprintf(stderr, "Error while handling event\n");
 				close(events[i].data.fd);
@@ -549,51 +692,37 @@ int main()
 			}
 			close(events[i].data.fd);
 		}
-		if (rc == 0)
-			continue;
 
+		printf("----------------- Nodes ----------------\n");
 		node_tmp = node_head;
 		while(node_tmp) {
 			printf("Node with id %d state %d\n", node_tmp->id, node_tmp->state);
+			if (node_tmp->state == available && !node_avail)
+				node_avail = node_tmp;
 			node_tmp = node_tmp->next;
 		}
+		printf("----------------------------------------\n");
+		printf("----------------- Tasks ----------------\n");
 		tsk_tmp = tsk_head;
 		while(tsk_tmp) {
 			printf("Task with id %d with state %d and bin at %s\n", tsk_tmp->id,tsk_tmp->state , tsk_tmp->bin_path);
+			if (tsk_tmp->state == ready && !tsk_avail)
+				tsk_avail = tsk_tmp;;
 			tsk_tmp = tsk_tmp->next;
 		}
-		node_tmp = node_head;
-		node_prev = NULL;
-		while(node_tmp) {
-			if (rc == 3) {
-				if (node_tmp->thr == node_ref) {
-					if (node_tmp == node_last)
-						node_last = node_prev;
-					if (node_prev == NULL)
-						node_head = node_tmp->next;
-					else
-						node_prev->next = node_tmp->next;
-					close(node_tmp->ev_fd);
-					free(node_tmp);
-					continue;
-				}
-			}
-			if (node_tmp->state == available)
-				break;
-			node_prev = node_tmp;
-			node_tmp = node_tmp->next;
-		}
-		tsk_tmp = tsk_head;
-		while(tsk_tmp) {
-			if (tsk_tmp->state == ready)
-				break;
-			tsk_tmp = tsk_tmp->next;
-		}
-		if (!tsk_tmp || !node_tmp)
+		printf("----------------------------------------\n");
+		if (!tsk_avail || !node_avail)
 			continue;
-		tsk_tmp->state = running;
-		node_tmp->state = busy;
-		rc = write(node_tmp->ev_fd, &tsk_tmp, sizeof(uint64_t));
+		/*
+		 * Deploy
+		 */
+		tsk_avail->state = running;
+		tsk_avail->node = node_avail;
+		tsk_avail->node_id = node_avail->id;
+		node_avail->task_id = tsk_avail->id;
+		node_avail->task = tsk_avail;
+		node_avail->state = busy;
+		rc = write(node_avail->ev_fd, &tsk_avail, sizeof(uint64_t));
 		if (rc < sizeof(uint64_t))
 			fprintf(stderr, "Could not write to eventfd\n");
 
