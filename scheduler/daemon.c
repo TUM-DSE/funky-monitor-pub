@@ -11,11 +11,21 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <sys/signalfd.h>
+#include <sys/un.h>
 
 #include <signal.h>
 
 #define BIN_PATH_LEN	254
 #define UKVM_BIN	"/home/cmainas/workspace/fpga_uni/funky-solo5/ukvm/ukvm-bin"
+#define UKVM_SOC	"/tmp/ukvm_socket"
+
+struct com_nod {
+	uint8_t type;
+	union {
+		off_t size;
+		struct in_addr rcv_ip;
+	};
+};
 
 static uint64_t write_file_n(uint8_t *buf, off_t size)
 {
@@ -78,12 +88,47 @@ err_read_f:
 	return NULL;
 }
 
+static int start_migration()
+{
+	int sockfd;
+	struct sockaddr_un addr;
+	int rc;
+
+	sockfd = socket(PF_UNIX, SOCK_STREAM, 0);
+	if (sockfd < 0) {
+		perror("Create socket");
+		return -1;
+	}
+
+	memset(&addr, 0, sizeof(struct sockaddr_un));
+	addr.sun_family = AF_UNIX;
+	strcpy(addr.sun_path, UKVM_SOC);
+	rc = connect(sockfd, (struct sockaddr *)&addr, sizeof(addr));
+	if (rc < 0) {
+		perror("Connect to ukvm socket");
+		goto mig_fail;
+	}
+
+	rc = write(sockfd, "savevm /tmp/file.mig", 20);
+	if (rc < 20) {
+		if (rc < 0)
+			perror("write to ukvm socket");
+		else
+			fprintf(stderr, "Short write to ukvm socket\n");
+		goto mig_fail;
+	}
+
+	return 0;
+mig_fail:
+	close(sockfd);
+	return -1;
+}
+
 static int handle_epoll(int epollfd, int socket, int sigfd)
 {
 	int rc;
 	int epoll_ret, i;
 	struct epoll_event events[2];
-	off_t bin_size;
 	uint8_t *buf;
 
 	epoll_ret = epoll_wait(epollfd, events, 2, -1);
@@ -94,28 +139,41 @@ static int handle_epoll(int epollfd, int socket, int sigfd)
 
 	for (i = 0; i < epoll_ret; i++) {
 		if (events[i].data.fd == socket) {
+			struct com_nod node_com;
 			
-			rc = read(socket, &bin_size, sizeof(off_t));
+			rc = read(socket, &node_com, sizeof(struct com_nod));
 			if (rc < 0) {
-				perror("Read binary size\n");
+				perror("Read message from primary\n");
 				return -1;
 			} else if (rc == 0) {
 				fprintf(stderr, "Lost connection with primary scheduler\n");
 				return -1;
 			} else if (rc < sizeof(off_t)) {
-				fprintf(stderr, "Short read on binary size\n");
+				fprintf(stderr, "Short read on primary's message\n");
 				return -1;
 			}
-			printf("size of binary is %ld\n", bin_size);
+			if (node_com.type == 0) {
+				printf("size of binary is %ld\n", node_com.size);
 
-			buf = read_file_n(socket, bin_size);
-			if (!buf)
-				return -1;
+				buf = read_file_n(socket, node_com.size);
+				if (!buf)
+					return -1;
 
-			rc = write_file_n(buf, bin_size);
-			free(buf);
-			if (rc < 0)
-				return -1;
+				rc = write_file_n(buf, node_com.size);
+				free(buf);
+				if (rc < 0)
+					return -1;
+			} else if (node_com.type == 1) {
+				char myIP[16];
+
+				inet_ntop(AF_INET, &node_com.rcv_ip, myIP, sizeof(myIP));
+
+				printf("I will have to migrate to %s\n", myIP);
+				rc =start_migration();
+				if (rc < 0)
+					return -1;
+				return 2;
+			}
 			return 1;
 		} else if (events[i].data.fd == sigfd) {
 			struct signalfd_siginfo sinfo;
@@ -132,7 +190,10 @@ static int handle_epoll(int epollfd, int socket, int sigfd)
 				printf("My child died? with code %d\n", sinfo.ssi_status);
 				if (sinfo.ssi_status == 0)
 					return 4;
-				else return 5;
+				else if (sinfo.ssi_status == 7)
+					return 6;
+				else
+					return 5;
 			}
 
 		}
@@ -150,7 +211,7 @@ static int start_guest()
 		 * child
 		 */
 		int fd;
-		char *const  e_args[] = {UKVM_BIN, "--net=tap0", "--disk=/tmp/binary.ukvm", "/tmp/binary.ukvm", NULL};
+		char *const  e_args[] = {UKVM_BIN, "--net=tap0", "--disk=/tmp/binary.ukvm", "--mon="UKVM_SOC, "/tmp/binary.ukvm", NULL};
 
 		fd = open("/tmp/guest_output", O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
 		if (fd < 0) {
@@ -282,8 +343,8 @@ int main(int argc, char *argv[])
 			if (start_guest() < 0)
 				goto out_pol;
 			printf("Started ukvm with guest\n");
-		} else {
-			if (send_deploy_res(sched_sock, rc) , 0)
+		} else if (rc ==2) {
+			if (send_deploy_res(sched_sock, rc) < 0)
 				goto out_pol;
 		}
 
