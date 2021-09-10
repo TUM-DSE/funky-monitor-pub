@@ -1,8 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -15,10 +13,9 @@
 #include <sys/sendfile.h>
 #include <fcntl.h>
 
-#define FRONT_SOCK	"/tmp/front.sock"
+#include "common.h"
+
 #define BIN_PATH_LEN	254
-#define MAX_EVENTS	10
-#define NODES_PORT	4217
 
 enum task_state {
 	ready = 0,
@@ -119,13 +116,16 @@ static char *strdup(const char *s)
 	return (char *) memcpy(new, s, len);
 }
 
+/*
+ * Create and initialize an entry for a new task
+ */
 static struct task *create_new_task(char *path)
 {
 	struct task *new_task;
 
 	new_task = malloc(sizeof(struct task));
 	if (!new_task) {
-		fprintf(stderr, "Out of memory while creating new struct task\n");
+		err_print("Out of memory while creating new struct task\n");
 		return NULL;
 	}
 
@@ -141,6 +141,12 @@ static struct task *create_new_task(char *path)
 	return new_task;
 }
 
+/*
+ * Handle commands from the frontend socket.
+ * The commands can be:
+ * - New task: <path_to_binary>
+ * - Migrate: Task <id> Node <node_id_to_migrate>
+ */
 static void *get_cmd_front(void *arg)
 {
 	int con, rc;
@@ -157,24 +163,30 @@ static void *get_cmd_front(void *arg)
 
 	rc = read(con, bin_path, BIN_PATH_LEN);
 	if (rc <= 0) {
-		fprintf(stderr, "Read from peer failed");
+		err_print("Read from peer failed\n");
 		goto exit_front;
 	}
 
+	/*
+	 * Determine if it is a command or a pth to a new binary
+	 * New task should start with '/' since full path is required.
+	 */
 	if (bin_path[0] == '/') {
 		/* Make sure we do not read rubbish, old commands etc */
 		bin_path[(rc > BIN_PATH_LEN) ? BIN_PATH_LEN - 1: rc] = '\0';
 
-		printf("New binary at %s\n", bin_path);
 		tsk_to_add = create_new_task(bin_path);
 		if (!tsk_to_add) {
-			fprintf(stderr, "Could not create new task\n");
+			err_print("Could not create new task\n");
 			goto exit_front;
 		}
 
+		/*
+		 * Send the new task to main thread
+		 */
 		nmsg = malloc(sizeof(struct notify_msg));
 		if (!nmsg) {
-			fprintf(stderr, "Out of memory for notify msg\n");
+			err_print("Out of memory for notify msg\n");
 			free(tsk_to_add);
 			goto exit_front;
 		}
@@ -187,13 +199,22 @@ static void *get_cmd_front(void *arg)
 	} else {
 		uint32_t tsk_ref, node_ref;
 
+		/*
+		 * Read the id of the task which will get migrated and
+		 * the new node ehre the migrated task will resume execution
+		 */
 		rc = sscanf(bin_path, "Task: %u Node: %u", &tsk_ref, &node_ref);
-		if (rc < 2 )
-			fprintf(stderr, "Invalid command\n");
-		printf("prepei na kanw migrate to task %u sto %u\n", tsk_ref, node_ref);
+		if (rc < 2) {
+			err_print("Invalid command\n");
+			goto exit_front;
+		}
+
+		/*
+		 * Send migration info to main thread
+		 */
 		nmsg = malloc(sizeof(struct notify_msg));
 		if (!nmsg) {
-			fprintf(stderr, "Out of memory for notify msg\n");
+			err_print("Out of memory for notify msg\n");
 			goto exit_front;
 		}
 		nmsg->type = migration;
@@ -237,7 +258,7 @@ static int send_binary(struct task *tsk, int socket)
 		if (rc < 0)
 			perror("Send file size");
 		else
-			fprintf(stderr, "Short send of binary size\n");
+			err_print("Short send of binary size\n");
 		goto err_send;
 	}
 
@@ -276,7 +297,7 @@ static ssize_t send_migration_command(struct node *nd, int socket)
 		if (rc < 0)
 			perror("Send migration command");
 		else
-			fprintf(stderr, "Short send of migration command\n");
+			err_print("Short send of migration command\n");
 		return -1;
 	}
 	return 0;
@@ -305,7 +326,7 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd)
 				printf("Connection closed\n");
 				return -1;;
 			} else if (rc < sizeof(int)) {
-				fprintf(stderr, "Short read from node's message\n");
+				err_print("Short read from node's message\n");
 				return -1;
 			}
 			if (node_msg == 7)
@@ -313,7 +334,7 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd)
 
 			nmsg = malloc(sizeof(struct notify_msg));
 			if (!nmsg) {
-				fprintf(stderr, "Out of memory for notify msg\n");
+				err_print("Out of memory for notify msg\n");
 				return -1;;
 			}
 			nmsg->type = node_ret;
@@ -329,7 +350,7 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd)
 
 			rc = read(sched_efd, &efval, sizeof(uint64_t));
 			if (rc < sizeof(uint64_t)) {
-				fprintf(stderr, "Read from eventfd failed");
+				err_print("Read from eventfd failed");
 				return -1;;
 			}
 
@@ -407,7 +428,7 @@ exit_node:
 	close(con);
 	nmsg = malloc(sizeof(struct notify_msg));
 	if (!nmsg) {
-		fprintf(stderr, "Out of memory for notify msg\n");
+		err_print("Out of memory for notify msg\n");
 		goto out_node;
 	}
 	nmsg->type = node_down;
@@ -421,63 +442,6 @@ out_node:
 	if (epollfd)
 		close(epollfd);
 	return NULL;
-}
-
-static int setup_socket(int domain, int epollfd)
-{
-	int sock, rc;
-	struct epoll_event ev;
-
-	sock = socket(domain, SOCK_STREAM, 0);
-	if (sock == -1) {
-		fprintf(stderr, "socket error %d\n", errno);
-		return -1;;
-	}
-
-	if (domain == AF_UNIX) {
-		struct sockaddr_un saddr_un = {0};
-
-		saddr_un.sun_family = AF_UNIX;
-		strcpy(saddr_un.sun_path, FRONT_SOCK);
-		unlink(FRONT_SOCK);
-		rc = bind(sock, (struct sockaddr *) &saddr_un,
-				sizeof(struct sockaddr_un));
-	} else if (domain == AF_INET) {
-		struct sockaddr_in saddr_in = {0};
-
-		saddr_in.sin_family = AF_INET;
-		saddr_in.sin_addr.s_addr = htonl(INADDR_ANY);;
-		saddr_in.sin_port = htons(NODES_PORT);
-		rc = bind(sock, (struct sockaddr *) &saddr_in,
-				sizeof(struct sockaddr_in));
-	} else {
-		fprintf(stderr, "Invalid domain\n");
-		goto err_set;
-	}
-
-	if (rc == -1) {
-		perror("socket bind");
-		goto err_set;
-	}
-
-	rc = listen(sock, MAX_EVENTS - 1);
-	if (rc == -1) {
-		perror("Socket listen");
-		goto err_set;
-	}
-
-	ev.events = EPOLLIN | EPOLLET;
-	ev.data.fd = sock;
-	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sock, &ev) == -1) {
-		perror("epoll_ctl: frontend socket");
-		goto err_set;
-	}
-
-	return sock;
-
-err_set:
-	close(sock);
-	return -1;
 }
 
 static void migration_cmd(struct mig_info minfo,struct node *nhead, struct task *thead)
@@ -501,18 +465,18 @@ static void migration_cmd(struct mig_info minfo,struct node *nhead, struct task 
 		node_tmp = node_tmp->next;
 	}
 	if (!node_tmp || !tsk_tmp) {
-		fprintf(stderr, "Could not find task or node\n");
+		err_print("Could not find task or node\n");
 		return;
 	}
 	node_in = tsk_tmp->node;
 	if (node_tmp->state == busy) {
-		fprintf(stderr, "Destination node is busy\n");
+		err_print("Destination node is busy\n");
 		return;
 	}
 
 	msg_nd = malloc(sizeof(struct msg_to_node));
 	if (!msg_nd) {
-		fprintf(stderr, "Out of memory for message to node\n");
+		err_print("Out of memory for message to node\n");
 		return;
 	}
 	msg_nd->type = migrate;
@@ -520,7 +484,7 @@ static void migration_cmd(struct mig_info minfo,struct node *nhead, struct task 
 
 	rc = write(node_in->ev_fd, &msg_nd, sizeof(uint64_t));
 	if (rc < sizeof(uint64_t)) {
-		fprintf(stderr, "Could not write to eventfd\n");
+		err_print("Could not write to eventfd\n");
 		free(msg_nd);
 		return;
 	}
@@ -536,16 +500,25 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 	struct thr_data *worker_data;
 
 	if (fd == fsock) {
+		/*
+		 * Someone connected to Unix domain socket.
+		 * Either a new command or a new task.
+		 */
 		struct epoll_event ev;
 
 		worker_data = malloc(sizeof(struct thr_data));
 		if (!worker_data) {
-			fprintf(stderr, "Out of memory for worker data\n");
+			err_print("Out of memory\n");
 			return -1;
 		}
+
+		/*
+		 * Create eventfd for communication between main thread and
+		 * the worker thread which will handle the incoming request.
+		 */
 		rc = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 		if (rc < 0) {
-			perror("Eventfd for frontend socket");
+			perror("Eventfd for frontend worker");
 			goto err_handle;
 		}
 
@@ -559,6 +532,9 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			goto err_handle_ev;
 		}
 
+		/*
+		 * Spawn worker thread to handle the request from the frontend.
+		 */
 		rc = pthread_create(&worker, NULL, get_cmd_front,
 				   (void *) worker_data);
 		if (rc) {
@@ -567,13 +543,16 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 		}
 
 	} else if (fd == nsock) {
+		/*
+		 * Someone connected to the TCP/IP socket for nodes.
+		 */
 		struct epoll_event ev;
 		struct node *new_node;
 		struct notify_msg *tmp_msg = NULL;
 
 		worker_data = malloc(sizeof(struct thr_data));
 		if (!worker_data) {
-			fprintf(stderr, "Out of memory for worker data\n");
+			err_print("Out of memory\n");
 			return -1;
 		}
 		worker_data->socket = nsock;
@@ -601,17 +580,19 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			goto err_handle_ev;
 		}
 
+		/*
+		 * Create new node
+		 */
 		new_node = malloc(sizeof(struct node));
 		if (!new_node) {
-			fprintf(stderr, "Out of memory for new node\n");
-			/* TODO: close connection and destroy thread */
+			err_print("Out of memory\n");
 			goto err_handle_ev;
 		}
 		worker_data->node = new_node;
 		rc = pthread_create(&worker, NULL, node_communication,
 				   (void *) worker_data);
 		if (rc) {
-			perror("Frontend worker create");
+			perror("Create node worker");
 			goto err_handle_ev;
 		}
 
@@ -620,9 +601,13 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 		new_node->task = NULL;
 		new_node->ev_fd = worker_data->rcv_efd;
 		new_node->state = available;
+
+		/*
+		 * Return the new node
+		 */
 		tmp_msg = malloc(sizeof(struct notify_msg));
 		if (!tmp_msg) {
-			fprintf(stderr, "Out of memory %s -- %d\n", __func__, __LINE__);
+			err_print("Out of memory\n");
 			free(new_node);
 			goto err_handle_ev;
 		}
@@ -634,8 +619,6 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 
 	} else {
 		uint64_t eeval;
-		//struct notify_msg *new_msg;
-		//int ret = 2;
 
 		rc = read(fd, &eeval, sizeof(uint64_t));
 		if (rc < 0) {
@@ -643,28 +626,6 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			return -1;;
 		}
 		*new_msg = (struct notify_msg *) eeval;
-		//switch(new_msg->type) {
-		//case task_new:
-		//	*tsk = new_msg->tsk;
-		//	break;
-		//case node_down:
-		//	*node_ref = new_msg->nres.thr;
-		//	ret = 3;
-		//	break;
-		//case node_ret:
-		//	*node_ref = new_msg->nres.thr;
-		//	ret = new_msg->nres.res;
-		//	break;
-		//case migration:
-		//	//send_migration_command(new_msg->migr_info);
-		//	break;
-		//default:
-		//	fprintf(stderr, "I should not be here %s - %d\n", __func__, __LINE__);
-		//	exit(1);
-		//}
-		//free(new_msg);
-
-		//return ret;
 		return 1;
 	}
 
@@ -731,6 +692,38 @@ static void remove_node(struct node **hd, struct node **lst, pthread_t ref)
 	return;
 }
 
+/*
+ * Apply scheduling algorithm and pick task and the node where it will
+ * be deployed
+ */
+static void scheduler_algorithm(struct node *nhead, struct task *thead,
+				struct node **pick_n, struct task **pick_t)
+{
+	struct node *node_tmp = NULL, *node_avail = NULL;
+	struct task *tsk_tmp = NULL, *tsk_avail = NULL;
+
+	printf("----------------- Nodes ----------------\n");
+	node_tmp = nhead;
+	while(node_tmp) {
+		printf("Node with id %d state %d\n", node_tmp->id, node_tmp->state);
+		if (node_tmp->state == available && !node_avail)
+			node_avail = node_tmp;
+		node_tmp = node_tmp->next;
+	}
+	printf("----------------------------------------\n");
+	printf("----------------- Tasks ----------------\n");
+	tsk_tmp = thead;
+	while(tsk_tmp) {
+		printf("Task id %d with state %d and bin at %s\n", tsk_tmp->id,tsk_tmp->state , tsk_tmp->bin_path);
+		if (tsk_tmp->state == ready && !tsk_avail)
+			tsk_avail = tsk_tmp;;
+		tsk_tmp = tsk_tmp->next;
+	}
+	printf("----------------------------------------\n");
+	*pick_n = node_avail;
+	*pick_t = tsk_avail;
+}
+
 int main()
 {
 	uint32_t nr_tsks = 1;
@@ -738,7 +731,6 @@ int main()
 	struct task *tsk_head = NULL, *tsk_last = NULL;
 	struct epoll_event events[MAX_EVENTS];
 	int rc = 0, epoll_ret, epollfd, front_sock, nodes_sock;
-	struct task *tsk_tmp;
 	struct node *node_tmp;
 
 	epollfd = epoll_create1(0);
@@ -747,29 +739,39 @@ int main()
 		exit(EXIT_FAILURE);
 	}
 
+	/*
+	 * Create socket for the frontend part, where new tasks are reported.
+	 */
 	front_sock = setup_socket(AF_UNIX, epollfd);
 	if (front_sock < 0) {
-		fprintf(stderr, "Could not setup_socketup frontend socket\n");
+		err_print("Could not setup_socketup frontend socket\n");
 		goto fail_pol;
 	}
 
+	/*
+	 * Open a socket to work as a server where nodes will connect to
+	 */
 	nodes_sock = setup_socket(AF_INET, epollfd);
 	if (front_sock < 0) {
-		fprintf(stderr, "Could not setup_socketup frontend socket\n");
+		err_print("Could not setup_socketup frontend socket\n");
 		goto fail_soc;
 	}
 
 	printf("Listesning commands at %s\n", FRONT_SOCK);
+	printf("Waiting for nodes to connect in port %d\n", NODES_PORT);
 
 	while(1) {
 		int i;
 		struct task *tsk_avail = NULL;
 		struct node *node_avail = NULL;
-		struct notify_msg *new_msg = NULL;;
-		struct node *node_to_add = NULL;
-		struct task *tsk_to_add = NULL;
 		struct msg_to_node *msg_nd;
 
+		/*
+		 * Main thread waits for events from:
+		 * front end socket
+		 * server socket for new new nodes
+		 * shared eventfds with the node worker threads
+		 */
 		epoll_ret = epoll_wait(epollfd, events, MAX_EVENTS, -1);
 		if (epoll_ret == -1) {
 			perror("epoll_wait");
@@ -777,45 +779,51 @@ int main()
 		}
 
 		for (i = 0; i < epoll_ret; i++) {
+			struct notify_msg *new_msg = NULL;;
+
 			if (events[i].events == 0)
 				continue;
+
 			rc = handle_event(events[i].data.fd, front_sock,
-					  nodes_sock, epollfd,
-					  &new_msg);
+					  nodes_sock, epollfd, &new_msg);
 			if (rc < 0) {
-				fprintf(stderr, "Error while handling event\n");
+				err_print("Error while handling event\n");
 				close(events[i].data.fd);
 				goto fail_socs;
 			} else if (rc == 0) {
+				/*
+				 * Nothing new happened yet.
+				 * Just a new connection
+				 * WOrker thread will handle and report it.
+				 */
 				continue;
 			}
 
 			switch(new_msg->type) {
 			case node_new:
-				node_to_add = new_msg->node;
 				if (node_head == NULL) {
-					node_to_add->id = 1;
-					node_head = node_last = node_to_add;
+					new_msg->node->id = 1;
+					node_head = node_last = new_msg->node;
 				} else {
-					node_to_add->id = node_last->id + 1;
-					node_last->next = node_to_add;
-					node_last = node_to_add;
+					new_msg->node->id = node_last->id + 1;
+					node_last->next = new_msg->node;
+					node_last = new_msg->node;
 				}
 				break;
 			case task_new:
-				tsk_to_add = new_msg->tsk;
-				tsk_to_add->id = nr_tsks++;
+				new_msg->tsk->id = nr_tsks++;
 				if (tsk_head == NULL) {
-					tsk_head = tsk_last = tsk_to_add;
+					tsk_head = tsk_last = new_msg->tsk;
 				} else {
-					tsk_last->next = tsk_to_add;
-					tsk_last = tsk_to_add;
+					tsk_last->next = new_msg->tsk;
+					tsk_last = new_msg->tsk;
 				}
 				close(events[i].data.fd);
 				break;
 			case node_down:
-				printf("Node down\n");
+				printf("Node with id ");
 				remove_node(&node_head, &node_last, new_msg->nres.thr);
+				printf("went down\n");
 				break;
 			case node_ret:
 				node_tmp = node_head;
@@ -826,11 +834,9 @@ int main()
 
 				}
 				if (!node_tmp) {
-					fprintf(stderr, "I could not find node..\n");
+					err_print("I could not find node..\n");
 					goto fail_socs;
 				}
-				if (new_msg->nres.res == 4)
-					break;
 				printf("Task with id ");
 				remove_task(&tsk_head, &tsk_last, node_tmp->task_id);
 				if (new_msg->nres.res == 4)
@@ -839,36 +845,18 @@ int main()
 					printf("failed\n");
 				break;
 			case migration:
-				printf("thelei migration\n");
 				migration_cmd(new_msg->migr_info, node_head, tsk_head);
 				close(events[i].data.fd);
 				break;
 			default:
-				fprintf(stderr, "Error while handling event\n");
+				err_print("Error while handling event\n");
 				close(events[i].data.fd);
 				goto fail_socs;
 			}
 			free(new_msg);
 		}
 
-		printf("----------------- Nodes ----------------\n");
-		node_tmp = node_head;
-		while(node_tmp) {
-			printf("Node with id %d state %d\n", node_tmp->id, node_tmp->state);
-			if (node_tmp->state == available && !node_avail)
-				node_avail = node_tmp;
-			node_tmp = node_tmp->next;
-		}
-		printf("----------------------------------------\n");
-		printf("----------------- Tasks ----------------\n");
-		tsk_tmp = tsk_head;
-		while(tsk_tmp) {
-			printf("Task id %d with state %d and bin at %s\n", tsk_tmp->id,tsk_tmp->state , tsk_tmp->bin_path);
-			if (tsk_tmp->state == ready && !tsk_avail)
-				tsk_avail = tsk_tmp;;
-			tsk_tmp = tsk_tmp->next;
-		}
-		printf("----------------------------------------\n");
+		scheduler_algorithm(node_head, tsk_head, &node_avail, &tsk_avail);
 		if (!tsk_avail || !node_avail)
 			continue;
 		/*
@@ -876,15 +864,18 @@ int main()
 		 */
 		msg_nd = malloc(sizeof(struct msg_to_node));
 		if (!msg_nd) {
-			fprintf(stderr, "Out of memory for message to node\n");
+			err_print("Out of memory for message to node\n");
 			goto fail_socs;
 		}
 		msg_nd->type = deploy;
 		msg_nd->tsk = tsk_avail;
 
 		rc = write(node_avail->ev_fd, &msg_nd, sizeof(uint64_t));
-		if (rc < sizeof(uint64_t))
-			fprintf(stderr, "Could not write to eventfd\n");
+		if (rc < sizeof(uint64_t)) {
+			err_print("Could not write to eventfd\n");
+			free(msg_nd);
+			continue;
+		}
 
 		tsk_avail->state = running;
 		tsk_avail->node = node_avail;
