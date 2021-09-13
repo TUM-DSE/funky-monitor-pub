@@ -17,6 +17,10 @@
 
 #define BIN_PATH_LEN	254
 
+/*
+ * The state of a task. For the time being
+ * only the first 2 states are used.
+ */
 enum task_state {
 	ready = 0,
 	running,
@@ -24,49 +28,84 @@ enum task_state {
 	done
 };
 
+/*
+ * The state of a node. If a node goes down then it gets removed
+ * from node list.
+ */
 enum node_state {
 	available = 0,
 	busy
 };
 
+/*
+ * Type of message between worker threads and main thread
+ */
+enum msg_type {
+	task_new = 0,
+	node_new,
+	node_ret,	// A node reported back the sult of a task execution
+	node_down,
+	migration
+};
+
+/*
+ * Type of message between primary scheduler and daemons
+ * It is mainly used to distinguish commands from files.
+ */
+enum mnode_type {
+	deploy = 0,
+	migrate
+};
+
 struct task {
 	uint32_t id;
 	char *bin_path;
-	uint32_t node_id;
-	struct node *node;
 	enum task_state state;
+	uint32_t node_id;	// Info regarding the node where the task has
+	struct node *node;	// been deployed
 	struct task *next;
 };
 
 struct node {
 	uint32_t id;
-	pthread_t thr;
-	int ev_fd;
-	struct in_addr ipv4;;
-	uint32_t task_id;
-	struct task *task;
 	enum node_state state;
+	// the thread which handles the communication with a node
+	pthread_t thr;
+	// eventfd used to send commands to the worker thead
+	int ev_fd;
+	int snd_efd;		// eventfd used to send commands to main thread
+	struct in_addr ipv4;;	// ip address of connected node
+	uint32_t task_id;	// Info regarding the task which has been
+	struct task *task;	// deployed in this node
 	struct node *next;
 };
 
+/*
+ * A struct which contains info regarding the result of execution in a node
+ * The thr field is used to identify the node where the task was running
+ */
 struct node_result {
 	pthread_t thr;
 	int res;
 };
 
+/*
+ * A struct containing the id of the task which will be migrated and the id
+ * of new node.
+ */
 struct mig_info {
 	uint32_t tsk_id;
 	uint32_t node_id;
 };
 
-enum msg_type {
-	task_new = 0,
-	node_new,
-	node_ret,
-	node_down,
-	migration
-};
-
+/*
+ * Struct which contains a message from worker threads to main thread
+ * The message can be:
+ * - A new task
+ * - An event regarding a node
+ * - Result of task execution
+ * - Info abour migration request
+ */
 struct notify_msg {
 	enum msg_type type;
 	union {
@@ -77,12 +116,12 @@ struct notify_msg {
 	};
 };
 
-enum mnode_type {
-	deploy = 0,
-	migrate
-};
-
-struct msg_to_node {
+/*
+ * Struct which contains a message from main thread to worker threads
+ * There are 2 types of messages. A new task to deploy or
+ * a command to migrate current task to node pointed in this struct.
+ */
+struct msg_to_worker {
 	enum mnode_type type;
 	union {
 		struct task *tsk;
@@ -90,15 +129,23 @@ struct msg_to_node {
 	};
 };
 
+/*
+ * Struct which is used to pass info in the worker threads.
+ */
 struct thr_data {
 	int socket;
-	int rcv_efd;
-	int snd_efd;
-	struct node *node;
+	int rcv_efd; // eventfd where worker thread will receive new messages
+	int snd_efd; // eventfd where worker thread will send new messages
+	struct node *node; // the node associated with the current thread
 };
 
+/*
+ * A struct which contains a message to a node.
+ * This message precedes file transmission and in case of migration
+ * notifies the daemon about the new node where task will migrate.
+ */
 struct com_nod {
-	uint8_t type;
+	enum mnode_type type;
 	union {
 		off_t size;
 		struct in_addr rcv_ip;
@@ -194,8 +241,10 @@ static void *get_cmd_front(void *arg)
 		nmsg->tsk = tsk_to_add;
 
 		rc = write(td->snd_efd, &nmsg, sizeof(uint64_t));
-		if (rc < 0)
+		if (rc < 0) {
 			perror("write new task in eventfd");
+			free(nmsg);
+		}
 	} else {
 		uint32_t tsk_ref, node_ref;
 
@@ -222,8 +271,10 @@ static void *get_cmd_front(void *arg)
 		nmsg->migr_info.node_id = node_ref;
 
 		rc = write(td->snd_efd, &nmsg, sizeof(uint64_t));
-		if (rc < 0)
+		if (rc < 0) {
 			perror("write new task in eventfd");
+			free(nmsg);
+		}
 	}
 
 exit_front:
@@ -232,7 +283,107 @@ exit_front:
 	return NULL;
 }
 
-static int send_binary(struct task *tsk, int socket)
+/*
+ * Find the task which should get migrated and
+ * notify current node regarding the migration request.
+ * 
+ * IMPORTANT:
+ * For the time being the primary scheduler does not check if migration was
+ * successful or not. As long as the command has been sent the task is
+ * considered migrated to the new node. In case any error happens, both nodes
+ * will go down and the task will become ready for execution. We might need
+ * to revisit this in the future.
+ */
+static void handle_migration_cmd(struct mig_info minfo,struct node *nhead,
+				 struct task *thead)
+{
+	struct node *node_tmp, *node_cur;
+	struct task *tsk_tmp;
+	ssize_t rc;
+	struct msg_to_worker *msg_wrk;
+
+	tsk_tmp = thead;
+	while (tsk_tmp) {
+		if (tsk_tmp->id == minfo.tsk_id)
+			break;
+		tsk_tmp = tsk_tmp->next;
+	}
+
+	node_tmp = nhead;
+	while (node_tmp) {
+		if (node_tmp->id == minfo.node_id)
+			break;
+		node_tmp = node_tmp->next;
+	}
+
+	if (!node_tmp || !tsk_tmp) {
+		err_print("Could not find task or node\n");
+		return;
+	}
+	if (node_tmp->state == busy) {
+		err_print("Destination node is busy\n");
+		return;
+	}
+
+	node_cur = tsk_tmp->node;
+	/*
+	 * Notify the worker to send the migration command to the respective
+	 * node.
+	 */
+	msg_wrk = malloc(sizeof(struct msg_to_worker));
+	if (!msg_wrk) {
+		err_print("Out of memory\n");
+		return;
+	}
+	msg_wrk->type = migrate;
+	msg_wrk->node = node_tmp;
+
+	rc = write(node_cur->ev_fd, &msg_wrk, sizeof(uint64_t));
+	if (rc < sizeof(uint64_t)) {
+		err_print("Could not write to eventfd\n");
+		free(msg_wrk);
+		return;
+	}
+	/*
+	 * Change status of the nodes
+	 */
+	node_tmp->state = busy;
+	node_cur->state = available;
+	node_cur->task_id = 0;
+	tsk_tmp->node_id = node_tmp->id;
+	node_tmp->task_id = tsk_tmp->id;
+	node_tmp->task = tsk_tmp;
+}
+
+/*
+ * Send migration command to the node where task is currently tunning
+ * Primary scheduler does not get involved in the migration process.
+ * The current node will receive the migration and command, request ukvm
+ * to ave the vm and transfer the needed files to the new node.
+ */
+static ssize_t send_migration_command(struct node *nd, int socket)
+{
+	ssize_t rc;
+	struct com_nod nod_com;
+
+	nod_com.type = migrate;
+	nod_com.rcv_ip = nd->ipv4;
+
+	rc = write(socket, &nod_com, sizeof(struct com_nod));
+	if (rc < sizeof(struct com_nod)) {
+		if (rc < 0)
+			perror("Send migration command");
+		else
+			err_print("Short send of migration command\n");
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Send a file over a socket
+ */
+static int send_file(struct task *tsk, int socket)
 {
 	int rc = 0, fd;
 	struct stat st;
@@ -241,29 +392,33 @@ static int send_binary(struct task *tsk, int socket)
 
 	fd = open(tsk->bin_path, O_RDONLY);
 	if (fd < 0) {
-		perror("Opening binry to send it");
+		perror("Opening file to send");
 		return -1;
 	}
 
+	/*
+	 * Get size of file
+	 */
 	rc = stat(tsk->bin_path, &st);
 	if (rc < 0) {
-		perror("binary size");
+		perror("Getting file size");
 		goto err_send;
 	}
 
-	node_com.type = 0;
+	node_com.type = deploy;
 	node_com.size = st.st_size;
 	rc = write(socket, &node_com, sizeof(struct com_nod));
 	if (rc < sizeof(struct com_nod)) {
 		if (rc < 0)
-			perror("Send file size");
+			perror("Sending file info");
 		else
-			err_print("Short send of binary size\n");
+			err_print("Short send of file info\n");
 		goto err_send;
 	}
 
-	printf("I will deploy binary with id %d. It has size %ld\n", tsk->id, st.st_size);
-
+	/*
+	 * Make sure the whole file is sent.
+	 */
 	while (count < st.st_size) {
 		n = sendfile(socket, fd, NULL, st.st_size - count);
 		if (n < 0) {
@@ -279,30 +434,12 @@ err_send:
 	return -1;
 }
 
-static ssize_t send_migration_command(struct node *nd, int socket)
-{
-	ssize_t rc;
-	char myIP[16];
-	struct com_nod nod_com;
-
-	inet_ntop(AF_INET, &nd->ipv4, myIP, sizeof(myIP));
-
-	printf("Ip is %s\n", myIP);
-
-	nod_com.type = 1;
-	nod_com.rcv_ip = nd->ipv4;
-
-	rc = write(socket, &nod_com, sizeof(struct com_nod));
-	if (rc < sizeof(struct com_nod)) {
-		if (rc < 0)
-			perror("Send migration command");
-		else
-			err_print("Short send of migration command\n");
-		return -1;
-	}
-	return 0;
-}
-
+/*
+ * Handle events from worker's epoll.
+ * There can be just 2 events:
+ * - An event from the connected node
+ * - A new command from main thread
+ */
 static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd)
 {
 	int rc;
@@ -311,76 +448,125 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd)
 
 	epoll_ret = epoll_wait(epollfd, events, 2, -1);
 	if (epoll_ret == -1) {
-		perror("node epoll wait");
-		return -1;;
+		perror("worker epoll wait");
+		return -1;
 	}
 
 	for (i = 0; i < epoll_ret; i++) {
-		int node_msg = 0;
-
 		if (events[i].data.fd == con) {
+			/*
+			 * Something happened in the connected node.
+			 * Read it and report it back to main thread.
+			 */
 			struct notify_msg *nmsg = NULL;
+			int node_msg = 0;
 
 			rc = read(con, &node_msg, sizeof(int));
 			if (rc == 0) {
 				printf("Connection closed\n");
-				return -1;;
+				return -1;
 			} else if (rc < sizeof(int)) {
-				err_print("Short read from node's message\n");
+				err_print("Short read in node's message\n");
 				return -1;
 			}
+			/*
+			 * The node notified that the task was stopped to
+			 * generate a migration file successfully.
+			 * For the time being we ignore that info, but
+			 * we might want to revisit this in the future.
+			 */
 			if (node_msg == 7)
 				continue;
 
 			nmsg = malloc(sizeof(struct notify_msg));
 			if (!nmsg) {
-				err_print("Out of memory for notify msg\n");
-				return -1;;
+				err_print("Out of memory\n");
+				return -1;
 			}
 			nmsg->type = node_ret;
 			nmsg->nres.thr = pthread_self();
 			nmsg->nres.res = node_msg;
 
 			rc = write(snd_efd, &nmsg, sizeof(uint64_t));
-			if (rc < 0)
-				perror("write new task in eventfd");
+			if (rc < 0) {
+				perror("notify main thread for task result");
+				return -1;
+			}
 		} else if (events[i].data.fd == sched_efd) {
+			/*
+			 * Handle a new command from main thread.
+			 */
 			uint64_t efval;
-			struct msg_to_node *msg_node;
+			struct msg_to_worker *msg_node;
 
 			rc = read(sched_efd, &efval, sizeof(uint64_t));
 			if (rc < sizeof(uint64_t)) {
 				err_print("Read from eventfd failed");
-				return -1;;
+				return -1;
 			}
 
-			msg_node = (struct msg_to_node *) efval;
-			if (msg_node->type == deploy) {
-				rc = send_binary(msg_node->tsk, con);
-				free(msg_node);
-				if (rc < 0)
-					return -1;
-			} else if (msg_node->type == migrate) {
+			msg_node = (struct msg_to_worker *) efval;
+			if (msg_node->type == deploy)
+				rc = send_file(msg_node->tsk, con);
+			else if (msg_node->type == migrate)
 				rc = send_migration_command(msg_node->node, con);
-				free(msg_node);
-				if (rc < 0)
-					return -1;
-			}
+			free(msg_node);
+			if (rc < 0)
+				return -1;
 
 		}
 	}
 	return 0;
 }
 
+/*
+ * Create and initialize an entry for a new node
+ */
+static struct node *create_new_node(struct thr_data *td, int sfd)
+{
+	struct node *nd = NULL;
+	struct sockaddr_in saddr_node;
+	socklen_t slen;
+
+	/*
+	 * Create new node
+	 */
+	nd = malloc(sizeof(struct node));
+	if (!nd) {
+		err_print("Out of memory\n");
+		return NULL;;
+	}
+	/*
+	 * Get ip of the new node
+	 */
+	slen = sizeof(struct sockaddr_in);
+	memset(&saddr_node, 0, slen);
+	if (getsockname(sfd, (struct sockaddr *) &saddr_node, &slen) < 0) {
+		perror("Get ip from socket\n");
+		free(nd);
+		return NULL;
+	}
+	nd->ipv4 = saddr_node.sin_addr;
+	nd->thr = pthread_self();
+	nd->task_id = 0;
+	nd->task = NULL;
+	nd->ev_fd = td->rcv_efd;
+	nd->snd_efd = td->snd_efd;
+	nd->state = available;
+
+	return nd;
+}
+
+/*
+ * Handle the communication with a node.
+ */
 static void *node_communication(void *arg)
 {
 	int con, rc, epollfd = 0;
 	struct thr_data *td = (struct thr_data *) arg;
 	struct epoll_event ev;
 	struct notify_msg *nmsg = NULL;
-	struct node *nd = td->node;
-	struct sockaddr_in saddr_node;
-	socklen_t slen;
+	struct node *nd = NULL;
 
 	con = accept(td->socket, NULL, NULL);
 	if (con == -1) {
@@ -389,47 +575,71 @@ static void *node_communication(void *arg)
 		return NULL;
 	}
 
-	slen = sizeof(struct sockaddr_in);
-	memset(&saddr_node, 0, slen);
-	if (getsockname(con, (struct sockaddr *) &saddr_node, &slen) < 0) {
-		perror("Get ip from socket\n");
-		goto exit_node;
+	nd = create_new_node(td, con);
+	if (!nd) {
+		err_print("Could not create new node\n");
+		goto err_node;
 	}
-	nd->ipv4 = saddr_node.sin_addr;
 
+	/*
+	 * Notify main thread for the new node
+	 */
+	nmsg = malloc(sizeof(struct notify_msg));
+	if (!nmsg) {
+		err_print("Out of memory\n");
+		goto err_node;
+	}
+	nmsg->type = node_new;
+	nmsg->node = nd;
+	rc = write(td->snd_efd, &nmsg, sizeof(uint64_t));
+	if (rc < 0) {
+		perror("write new node in eventfd");
+		goto err_node;
+	}
+
+	/*
+	 * Worker thread epoll. There can be 2 events.
+	 * - A message from main thread (spawn/migrate task).
+	 * - A message from the node (task terminated/node down)
+	 */
 	epollfd = epoll_create1(0);
 	if (epollfd == -1) {
 		perror("node_communication: epoll_create1");
-		goto exit_node;
+		goto err_node;
 	}
 
 	ev.events = EPOLLIN;
 	ev.data.fd = con;
 	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, con, &ev) == -1) {
 		perror("epoll_ctl: node con socket");
-		goto exit_node;
+		goto err_node;
 	}
 
 	ev.events = EPOLLIN;
 	ev.data.fd = td->rcv_efd;
 	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, td->rcv_efd, &ev) == -1) {
 		perror("epoll_ctl: node eventfd");
-		goto exit_node;
+		goto err_node;
 	}
 
 	while(1)
 	{
 		rc = handle_node_comm(epollfd, con, td->rcv_efd, td->snd_efd);
 		if (rc < 0)
-			goto exit_node;
+			goto err_node;
 	}
 
-exit_node:
+err_node:
+	/*
+	 * An error occurred and the thread will stop. As a result
+	 * main thread should get notified that the node is down
+	 * A new connection has to get established.
+	 */
 	close(con);
 	nmsg = malloc(sizeof(struct notify_msg));
 	if (!nmsg) {
 		err_print("Out of memory for notify msg\n");
-		goto out_node;
+		goto err_node2;
 	}
 	nmsg->type = node_down;
 	nmsg->nres.thr = pthread_self();
@@ -437,61 +647,18 @@ exit_node:
 	rc = write(td->snd_efd, &nmsg, sizeof(uint64_t));
 	if (rc < 0)
 		perror("write new task in eventfd");
-out_node:
-	free(td);
+err_node2:
 	if (epollfd)
 		close(epollfd);
+	free(td);
 	return NULL;
 }
 
-static void migration_cmd(struct mig_info minfo,struct node *nhead, struct task *thead)
-{
-	struct node *node_tmp, *node_in;
-	struct task *tsk_tmp;
-	ssize_t rc;
-	struct msg_to_node *msg_nd;
-
-	tsk_tmp = thead;
-	while (tsk_tmp) {
-		if (tsk_tmp->id == minfo.tsk_id)
-			break;
-		tsk_tmp = tsk_tmp->next;
-	}
-
-	node_tmp = nhead;
-	while (node_tmp) {
-		if (node_tmp->id == minfo.node_id)
-			break;
-		node_tmp = node_tmp->next;
-	}
-	if (!node_tmp || !tsk_tmp) {
-		err_print("Could not find task or node\n");
-		return;
-	}
-	node_in = tsk_tmp->node;
-	if (node_tmp->state == busy) {
-		err_print("Destination node is busy\n");
-		return;
-	}
-
-	msg_nd = malloc(sizeof(struct msg_to_node));
-	if (!msg_nd) {
-		err_print("Out of memory for message to node\n");
-		return;
-	}
-	msg_nd->type = migrate;
-	msg_nd->node = node_tmp;
-
-	rc = write(node_in->ev_fd, &msg_nd, sizeof(uint64_t));
-	if (rc < sizeof(uint64_t)) {
-		err_print("Could not write to eventfd\n");
-		free(msg_nd);
-		return;
-	}
-	node_tmp->state = busy;
-	node_in->state = available;
-}
-
+/*
+ * Handle events for main thead.
+ * If the event is on a socket a new thread will get spawned,
+ * otherwise the received message will be forwarded to main function.
+ */
 static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			struct notify_msg **new_msg)
 {
@@ -547,8 +714,6 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 		 * Someone connected to the TCP/IP socket for nodes.
 		 */
 		struct epoll_event ev;
-		struct node *new_node;
-		struct notify_msg *tmp_msg = NULL;
 
 		worker_data = malloc(sizeof(struct thr_data));
 		if (!worker_data) {
@@ -558,6 +723,9 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 		worker_data->socket = nsock;
 		worker_data->rcv_efd = 0;
 		worker_data->snd_efd = 0;
+		/* 
+		 * eventfd for messages to the worker
+		 */
 		rc = eventfd(0, EFD_CLOEXEC);
 		if (rc < 0) {
 			perror("Eventfd for frontend socket");
@@ -565,6 +733,9 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 		}
 		worker_data->rcv_efd = rc;
 
+		/* 
+		 * eventfd for messages from the worker
+		 */
 		rc = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 		if (rc < 0) {
 			perror("Eventfd for frontend socket");
@@ -580,50 +751,22 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			goto err_handle_ev;
 		}
 
-		/*
-		 * Create new node
-		 */
-		new_node = malloc(sizeof(struct node));
-		if (!new_node) {
-			err_print("Out of memory\n");
-			goto err_handle_ev;
-		}
-		worker_data->node = new_node;
 		rc = pthread_create(&worker, NULL, node_communication,
 				   (void *) worker_data);
 		if (rc) {
 			perror("Create node worker");
 			goto err_handle_ev;
 		}
-
-		new_node->thr = worker;
-		new_node->task_id = 0;
-		new_node->task = NULL;
-		new_node->ev_fd = worker_data->rcv_efd;
-		new_node->state = available;
-
-		/*
-		 * Return the new node
-		 */
-		tmp_msg = malloc(sizeof(struct notify_msg));
-		if (!tmp_msg) {
-			err_print("Out of memory\n");
-			free(new_node);
-			goto err_handle_ev;
-		}
-		tmp_msg->type = node_new;
-		tmp_msg->node = new_node;
-		*new_msg = tmp_msg ;
-
-		return 1;
-
 	} else {
+		/*
+		 * Message from a worker thread
+		 */
 		uint64_t eeval;
 
 		rc = read(fd, &eeval, sizeof(uint64_t));
 		if (rc < 0) {
 			perror("Read eventfd");
-			return -1;;
+			return -1;
 		}
 		*new_msg = (struct notify_msg *) eeval;
 		return 1;
@@ -640,6 +783,9 @@ err_handle:
 	return -1;
 }
 
+/*
+ * Remove a task from the task list.
+ */
 static void remove_task(struct task **hd, struct task **lst, uint32_t id)
 {
 	struct task *task_tmp = *hd, *task_prev = NULL;
@@ -666,6 +812,9 @@ static void remove_task(struct task **hd, struct task **lst, uint32_t id)
 	return;
 }
 
+/*
+ * Remove a node from the node list.
+ */
 static void remove_node(struct node **hd, struct node **lst, pthread_t ref)
 {
 
@@ -681,6 +830,8 @@ static void remove_node(struct node **hd, struct node **lst, pthread_t ref)
 				node_prev->next = node_tmp->next;
 			if (node_tmp->task)
 				node_tmp->task->state = ready;
+			printf("%d ", node_tmp->id);
+			close(node_tmp->snd_efd);
 			close(node_tmp->ev_fd);
 			free(node_tmp);
 			return;
@@ -731,7 +882,6 @@ int main()
 	struct task *tsk_head = NULL, *tsk_last = NULL;
 	struct epoll_event events[MAX_EVENTS];
 	int rc = 0, epoll_ret, epollfd, front_sock, nodes_sock;
-	struct node *node_tmp;
 
 	epollfd = epoll_create1(0);
 	if (epollfd == -1) {
@@ -744,16 +894,16 @@ int main()
 	 */
 	front_sock = setup_socket(AF_UNIX, epollfd);
 	if (front_sock < 0) {
-		err_print("Could not setup_socketup frontend socket\n");
+		err_print("Could not setup_frontend socket\n");
 		goto fail_pol;
 	}
 
 	/*
-	 * Open a socket to work as a server where nodes will connect to
+	 * Open a socket as a server for nodes
 	 */
 	nodes_sock = setup_socket(AF_INET, epollfd);
 	if (front_sock < 0) {
-		err_print("Could not setup_socketup frontend socket\n");
+		err_print("Could not setup nodes socket\n");
 		goto fail_soc;
 	}
 
@@ -764,13 +914,13 @@ int main()
 		int i;
 		struct task *tsk_avail = NULL;
 		struct node *node_avail = NULL;
-		struct msg_to_node *msg_nd;
+		struct msg_to_worker *msg_work;
 
 		/*
 		 * Main thread waits for events from:
-		 * front end socket
-		 * server socket for new new nodes
-		 * shared eventfds with the node worker threads
+		 * - front end socket
+		 * - server socket for new new nodes
+		 * - shared eventfds with the node worker threads
 		 */
 		epoll_ret = epoll_wait(epollfd, events, MAX_EVENTS, -1);
 		if (epoll_ret == -1) {
@@ -794,7 +944,7 @@ int main()
 				/*
 				 * Nothing new happened yet.
 				 * Just a new connection
-				 * WOrker thread will handle and report it.
+				 * Worker thread will handle and report it.
 				 */
 				continue;
 			}
@@ -826,6 +976,8 @@ int main()
 				printf("went down\n");
 				break;
 			case node_ret:
+				struct node *node_tmp;
+
 				node_tmp = node_head;
 				while (node_tmp) {
 					if (node_tmp->thr == new_msg->nres.thr)
@@ -845,7 +997,8 @@ int main()
 					printf("failed\n");
 				break;
 			case migration:
-				migration_cmd(new_msg->migr_info, node_head, tsk_head);
+				handle_migration_cmd(new_msg->migr_info,
+						     node_head, tsk_head);
 				close(events[i].data.fd);
 				break;
 			default:
@@ -862,18 +1015,18 @@ int main()
 		/*
 		 * Deploy
 		 */
-		msg_nd = malloc(sizeof(struct msg_to_node));
-		if (!msg_nd) {
-			err_print("Out of memory for message to node\n");
+		msg_work = malloc(sizeof(struct msg_to_worker));
+		if (!msg_work) {
+			err_print("Out of memory\n");
 			goto fail_socs;
 		}
-		msg_nd->type = deploy;
-		msg_nd->tsk = tsk_avail;
+		msg_work->type = deploy;
+		msg_work->tsk = tsk_avail;
 
-		rc = write(node_avail->ev_fd, &msg_nd, sizeof(uint64_t));
+		rc = write(node_avail->ev_fd, &msg_work, sizeof(uint64_t));
 		if (rc < sizeof(uint64_t)) {
 			err_print("Could not write to eventfd\n");
-			free(msg_nd);
+			free(msg_work);
 			continue;
 		}
 
