@@ -7,7 +7,7 @@ SCHED_LDFLAGS := -lpthread
 primary: primary.o common.o
 	$(CC) $(SCHED_LDFLAGS) $^ -o $@
 
-daemon: daemon.o
+daemon: daemon.o common.o
 	$(CC) $(SCHED_LDFLAGS) $^ -o $@
 
 primary.o: primary.c

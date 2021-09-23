@@ -8,10 +8,9 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <arpa/inet.h>
-#include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/sendfile.h>
-#include <fcntl.h>
+#include <sys/un.h>
+#include <arpa/inet.h>
 
 #include "common.h"
 
@@ -46,15 +45,6 @@ enum msg_type {
 	node_ret,	// A node reported back the sult of a task execution
 	node_down,
 	migration
-};
-
-/*
- * Type of message between primary scheduler and daemons
- * It is mainly used to distinguish commands from files.
- */
-enum mnode_type {
-	deploy = 0,
-	migrate
 };
 
 struct task {
@@ -139,19 +129,6 @@ struct thr_data {
 	struct node *node; // the node associated with the current thread
 };
 
-/*
- * A struct which contains a message to a node.
- * This message precedes file transmission and in case of migration
- * notifies the daemon about the new node where task will migrate.
- */
-struct com_nod {
-	enum mnode_type type;
-	union {
-		off_t size;
-		struct in_addr rcv_ip;
-	};
-};
-
 static char *strdup(const char *s)
 {
 	size_t len = strlen(s) + 1;
@@ -201,6 +178,12 @@ static void *get_cmd_front(void *arg)
 	struct thr_data *td = (struct thr_data *) arg;
 	struct task *tsk_to_add = NULL;
 	struct notify_msg *nmsg = NULL;
+
+	rc = pthread_detach(pthread_self());
+	if (rc < 0) {
+		perror("detach thread");
+		return NULL;
+	}
 
 	con = accept(td->socket, NULL, NULL);
 	if (con == -1) {
@@ -366,7 +349,7 @@ static ssize_t send_migration_command(struct node *nd, int socket)
 	ssize_t rc;
 	struct com_nod nod_com;
 
-	nod_com.type = migrate;
+	nod_com.type = mig_cmd;
 	nod_com.rcv_ip = nd->ipv4;
 
 	rc = write(socket, &nod_com, sizeof(struct com_nod));
@@ -378,60 +361,6 @@ static ssize_t send_migration_command(struct node *nd, int socket)
 		return -1;
 	}
 	return 0;
-}
-
-/*
- * Send a file over a socket
- */
-static int send_file(struct task *tsk, int socket)
-{
-	int rc = 0, fd;
-	struct stat st;
-	ssize_t n, count = 0;
-	struct com_nod node_com;
-
-	fd = open(tsk->bin_path, O_RDONLY);
-	if (fd < 0) {
-		perror("Opening file to send");
-		return -1;
-	}
-
-	/*
-	 * Get size of file
-	 */
-	rc = stat(tsk->bin_path, &st);
-	if (rc < 0) {
-		perror("Getting file size");
-		goto err_send;
-	}
-
-	node_com.type = deploy;
-	node_com.size = st.st_size;
-	rc = write(socket, &node_com, sizeof(struct com_nod));
-	if (rc < sizeof(struct com_nod)) {
-		if (rc < 0)
-			perror("Sending file info");
-		else
-			err_print("Short send of file info\n");
-		goto err_send;
-	}
-
-	/*
-	 * Make sure the whole file is sent.
-	 */
-	while (count < st.st_size) {
-		n = sendfile(socket, fd, NULL, st.st_size - count);
-		if (n < 0) {
-			perror("Sending file");
-			goto err_send;
-		}
-		count += n;
-	}
-	return rc;
-
-err_send:
-	close(fd);
-	return -1;
 }
 
 /*
@@ -507,7 +436,7 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd)
 
 			msg_node = (struct msg_to_worker *) efval;
 			if (msg_node->type == deploy)
-				rc = send_file(msg_node->tsk, con);
+				rc = send_file(con, msg_node->tsk->bin_path, deploy);
 			else if (msg_node->type == migrate)
 				rc = send_migration_command(msg_node->node, con);
 			free(msg_node);
@@ -567,6 +496,12 @@ static void *node_communication(void *arg)
 	struct epoll_event ev;
 	struct notify_msg *nmsg = NULL;
 	struct node *nd = NULL;
+
+	rc = pthread_detach(pthread_self());
+	if (rc < 0) {
+		perror("detach thread");
+		return NULL;
+	}
 
 	con = accept(td->socket, NULL, NULL);
 	if (con == -1) {
@@ -751,6 +686,7 @@ static int handle_event(int fd, int fsock, int nsock, int epollfd,
 			goto err_handle_ev;
 		}
 
+
 		rc = pthread_create(&worker, NULL, node_communication,
 				   (void *) worker_data);
 		if (rc) {
@@ -798,8 +734,10 @@ static void remove_task(struct task **hd, struct task **lst, uint32_t id)
 				*hd = task_tmp->next;
 			else
 				task_prev->next = task_tmp->next;
-			if (task_tmp->node)
+			if (task_tmp->node) {
 				task_tmp->node->state = available;
+				task_tmp->node->task = NULL;
+			}
 			printf("%d ", task_tmp->id);
 			free(task_tmp->bin_path);
 			free(task_tmp);
@@ -882,6 +820,8 @@ int main()
 	struct task *tsk_head = NULL, *tsk_last = NULL;
 	struct epoll_event events[MAX_EVENTS];
 	int rc = 0, epoll_ret, epollfd, front_sock, nodes_sock;
+	struct sockaddr_un saddr_un = {0};
+	struct sockaddr_in saddr_in = {0};
 
 	epollfd = epoll_create1(0);
 	if (epollfd == -1) {
@@ -890,9 +830,12 @@ int main()
 	}
 
 	/*
-	 * Create socket for the frontend part, where new tasks are reported.
+	 * Create unix domain socket for frontend, where new tasks are reported.
 	 */
-	front_sock = setup_socket(AF_UNIX, epollfd);
+	saddr_un.sun_family = AF_UNIX;
+	strcpy(saddr_un.sun_path, FRONT_SOCK);
+	unlink(FRONT_SOCK);
+	front_sock = setup_socket(epollfd, (struct sockaddr *) &saddr_un, 1);
 	if (front_sock < 0) {
 		err_print("Could not setup_frontend socket\n");
 		goto fail_pol;
@@ -901,7 +844,10 @@ int main()
 	/*
 	 * Open a socket as a server for nodes
 	 */
-	nodes_sock = setup_socket(AF_INET, epollfd);
+	saddr_in.sin_family = AF_INET;
+	saddr_in.sin_addr.s_addr = htonl(INADDR_ANY);
+	saddr_in.sin_port = htons(NODES_PORT);
+	nodes_sock = setup_socket(epollfd, (struct sockaddr *) &saddr_in, 1);
 	if (front_sock < 0) {
 		err_print("Could not setup nodes socket\n");
 		goto fail_soc;
@@ -952,8 +898,9 @@ int main()
 			switch(new_msg->type) {
 			case node_new:
 				if (node_head == NULL) {
-					new_msg->node->id = 1;
-					node_head = node_last = new_msg->node;
+					node_head = new_msg->node;
+					node_last = new_msg->node;
+					node_last->id = 1;
 				} else {
 					new_msg->node->id = node_last->id + 1;
 					node_last->next = new_msg->node;
