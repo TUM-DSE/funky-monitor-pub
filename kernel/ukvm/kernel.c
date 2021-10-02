@@ -29,6 +29,9 @@ void _start(void *arg)
     platform_init(arg);
     si.cmdline = cmdline_parse(platform_cmdline());
 
+    /* disable printing logs for evaluation */
+    log_set_level(ERROR);
+
     log(INFO, "            |      ___|\n");
     log(INFO, "  __|  _ \\  |  _ \\ __ \\\n");
     log(INFO, "\\__ \\ (   | | (   |  ) |\n");

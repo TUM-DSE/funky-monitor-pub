@@ -55,7 +55,7 @@ static void hypercall_fpgainfo(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 
 static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 {
-    printf("UKVM: set up fpga...\n");
+    // printf("UKVM: set up fpga...\n");
 
     struct ukvm_fpgainit *fpga =
         UKVM_CHECKED_GPA_P(hv, gpa, sizeof (struct ukvm_fpgainit));
@@ -106,7 +106,7 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 
 static void hypercall_fpgafree(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 {
-    printf("UKVM: release FPGA.\n");
+    // printf("UKVM: release FPGA.\n");
 
 #ifdef DISABLE_FPGA_THR
     /* release the FPGA */
@@ -145,7 +145,7 @@ static int handle_cmdarg(char *cmdarg)
 
 static int setup(struct ukvm_hv *hv)
 {
-    printf("monitor: register FPGA hypercalls.\n");
+    // printf("monitor: register FPGA hypercalls.\n");
 
     assert(ukvm_core_register_hypercall(UKVM_HYPERCALL_FPGAINFO,
                 hypercall_fpgainfo) == 0);

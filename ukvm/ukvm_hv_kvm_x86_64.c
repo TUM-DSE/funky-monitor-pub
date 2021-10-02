@@ -40,6 +40,8 @@
 #include "ukvm_hv_kvm.h"
 #include "ukvm_cpu_x86_64.h"
 
+#include <time.h>
+
 void ukvm_hv_mem_size(size_t *mem_size) {
     ukvm_x86_mem_size(mem_size);
 }
@@ -205,8 +207,12 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
             if (check_vm_state() != 3) {
                 continue;
             } else {
+                struct timespec start, end;
+                clock_gettime(CLOCK_MONOTONIC, &start);
                 savevm(hv);
                 savefpga(hv);
+                clock_gettime(CLOCK_MONOTONIC, &end);
+                printf("savevm(): %lf s\n", (double)(end.tv_sec - start.tv_sec) + ((double)(end.tv_nsec - start.tv_nsec) / 1000000000L) );
                 errx(1, "Stopped to save VM state");
             }
         }

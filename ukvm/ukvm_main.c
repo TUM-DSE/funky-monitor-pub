@@ -35,6 +35,8 @@
 
 #include "ukvm.h"
 
+#include <time.h>
+
 static void setup_cmdline(char *cmdline, int argc, char **argv)
 {
     size_t cmdline_free = UKVM_CMDLINE_SIZE;
@@ -224,8 +226,12 @@ int main(int argc, char **argv)
         ukvm_hv_vcpu_init(hv, gpa_ep, gpa_kend, &cmdline);
         setup_cmdline(cmdline, argc, argv);
     } else {
+        struct timespec start, end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
         long offset = loadvm(mig_file, hv);
         loadfpga(mig_file, offset, hv);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        printf("loadvm(): %lf s\n", (double)(end.tv_sec - start.tv_sec) + ((double)(end.tv_nsec - start.tv_nsec) / 1000000000L) );
     }
 
     if (set_mem_prot(hv->list))
