@@ -39,9 +39,11 @@ namespace funky_backend {
 
       uint64_t bin_guest_addr;
       size_t bin_size;
+      cl::Device device;
       cl::Context context;
       std::unique_ptr<cl::Program> program;
-      cl::CommandQueue queue;
+      std::map<int, cl::CommandQueue> queues;
+      // cl::CommandQueue queue;
 
       // TODO: kernels that have been initialized once will be reused in the future? If not, we don't need to keep them here
       std::map<const char*, cl::Kernel> kernels;
@@ -75,12 +77,14 @@ namespace funky_backend {
           exit(EXIT_FAILURE);
         }
 
-        auto device = devices[0];
+        // auto device = devices[0];
+        device = devices[0];
 
         // TODO: command queue option depends on the guest, so it shouldn't be created in advance?
         // Creating Context and Command Queue for selected Device
         OCL_CHECK(err, context = cl::Context(device, NULL, NULL, NULL, &err));
-        OCL_CHECK(err, queue = cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err));
+        // OCL_CHECK(err, queue = cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err));
+        OCL_CHECK(err,  queues.emplace(0, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
       }
 
       ~XoclContext()
@@ -183,15 +187,28 @@ namespace funky_backend {
       /**
        * launch the kernel 
        */
-      void enqueue_kernel(const char* kernel_name)
+      void enqueue_kernel(int msgq_id, const char* kernel_name)
       {
         cl_int err;
         auto id = kernel_name;
 
+        /* create a cmd queue if not exists */
+        auto queue_in_map = queues.find(msgq_id);
+        if(queue_in_map == queues.end()) {
+          // auto devices = xcl::get_xil_devices();
+          // if(devices.size() == 0) {
+          //   exit(EXIT_FAILURE);
+          // }
+          // auto device = devices[0];
+
+          OCL_CHECK(err,  queues.emplace(msgq_id, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
+          std::cout << "UKVM: new cmd queue (id: " << msgq_id << ") is created. " << std::endl;
+        }
+
         /* TODO: support for enqueueNDRangeKernel() */
         // For HLS kernels global and local size is always (1,1,1). So, it is recommended
         // to always use enqueueTask() for invoking HLS kernel
-        OCL_CHECK(err, err = queue.enqueueTask(kernels[id]));
+        OCL_CHECK(err, err = queues[msgq_id].enqueueTask(kernels[id]));
 
         sync_flag = false;
         updated_flag = true;
@@ -204,14 +221,24 @@ namespace funky_backend {
        * @param (flags)   : 0 means from host, CL_MIGRATE_MEM_OBJECT_HOST means to host 
        *                     cl_mem_migration_flags, a bitfield based on unsigned int64
        */
-      void enqueue_transfer(int mem_ids[], size_t id_num, uint64_t flags)
+      void enqueue_transfer(int msgq_id, int mem_ids[], size_t id_num, uint64_t flags)
       {
+        /* create a cmd queue if not exists */
+        auto queue_in_map = queues.find(msgq_id);
+        if(queue_in_map == queues.end()) {
+          cl_int err;
+          OCL_CHECK(err,  queues.emplace(msgq_id, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
+          std::cout << "UKVM: new cmd queue (id: " << msgq_id << ") is created. " << std::endl;
+        }
+
         for(size_t i=0; i<id_num; i++)
         {
+
           // TODO: consider when enqueueReadBuffer or enqueueWriteBuffer is called
           cl_int err;
           auto id = mem_ids[i];
-          OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
+          // OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
+          OCL_CHECK(err, err = queues[msgq_id].enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
 
           /* 0 means data transfers from Host to FPGA */
           if( flags == 0 )
@@ -225,9 +252,18 @@ namespace funky_backend {
       /**
        * wait for the completion of enqueued tasks 
        */
-      void sync_fpga()
+      void sync_fpga(int cmdq_id)
       {
-        queue.finish();
+        auto queue_in_map = queues.find(cmdq_id);
+        if(queue_in_map == queues.end()) {
+          std::cout << "UKVM (ERROR): cmd queue " << cmdq_id << " is not found. " << std::endl;
+          exit(1);
+        }
+
+        // queues[cmdq_id].finish();
+        // queue_in_map->second.data()->finish();
+        queue_in_map->second.finish();
+
         sync_flag=true;
       }
 
@@ -252,6 +288,8 @@ namespace funky_backend {
 
       void sync_shared_buffers()
       {
+        auto queue = queues[0];
+
         for(auto it : buffers)
         {
           auto id = it.first;
@@ -307,14 +345,16 @@ namespace funky_backend {
             auto data_ptr = saved_obj.find(id)->second.data();
 
             cl_int err;
-            OCL_CHECK(err, err = queue.enqueueReadBuffer(buffer, CL_TRUE, 0, 
+            // OCL_CHECK(err, err = queue.enqueueReadBuffer(buffer, CL_TRUE, 0, 
+            OCL_CHECK(err, err = queues[0].enqueueReadBuffer(buffer, CL_TRUE, 0, 
                   header.mem_size, data_ptr, nullptr, nullptr));
             total_size += header.mem_size;
           }
         }
         
         /* Wait for data transfers from FPGA (sync) */
-        queue.finish();
+        // queue.finish();
+        queues[0].finish();
 
         /* Copy data into a single buffer */
         mig_save_data.resize(total_size);
@@ -357,18 +397,21 @@ namespace funky_backend {
             cl_int err;
             if(h->mem_flags & CL_MEM_USE_HOST_PTR) {
               /* Restore data from a cache in guest memory space */
-              OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[h->mem_id]}, 0));
+              // OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[h->mem_id]}, 0));
+              OCL_CHECK(err, err = queues[0].enqueueMigrateMemObjects({buffers[h->mem_id]}, 0));
             }
             else {
               /* Restore data from migration file */
-              OCL_CHECK(err, err = queue.enqueueWriteBuffer(buffers[h->mem_id], 
+              // OCL_CHECK(err, err = queue.enqueueWriteBuffer(buffers[h->mem_id], 
+              OCL_CHECK(err, err = queues[0].enqueueWriteBuffer(buffers[h->mem_id], 
                     CL_TRUE, 0, h->mem_size, current_ptr, nullptr, nullptr));
               current_ptr += h->mem_size;
             }
           }
 
           /* Wait for data transfers from FPGA (sync) */
-          queue.finish();
+          // queue.finish();
+          queues[0].finish();
         }
 
         if(current_ptr != end_ptr)

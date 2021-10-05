@@ -29,7 +29,6 @@
 #include <algorithm>
 #include <vector>
 #include <thread>
-#define DATA_SIZE 4096
 
 /* Xocl backend context class to save temp data & communicate with xocl lib */
 std::unique_ptr<funky_backend::XoclContext> bk_context;

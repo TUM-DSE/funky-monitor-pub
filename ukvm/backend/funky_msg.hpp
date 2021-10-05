@@ -92,9 +92,13 @@ namespace funky_msg {
       uint32_t arg_num; 
       arg_info *args; 
 
+      /* for TRANSFER, EXECUTE, SYNQ request */
+      uint32_t cmdq_id;
+      // int32_t event_id; // -1: no event, 0 or higher: id
+
       /* for SYNC request */
       // uint32_t event_num;
-      // event_info events;
+      // uint32_t* event_ids;
 
     public:
       // delegating constructor (and for SYNC request)
@@ -114,15 +118,16 @@ namespace funky_msg {
       }
 
       /* for TRANSFER request */
-      request(ReqType type, void* ptr)
+      request(ReqType type, void* ptr, uint32_t cl_cmdq_id)
         : request(type)
       {
         // TODO: error if type != TRANSFER
         trans   = (transfer_info*) ptr;
+        cmdq_id = cl_cmdq_id;
       }
 
       /* for EXEC request */
-      request(ReqType type, const char* name, size_t size, uint32_t num, void* ptr)
+      request(ReqType type, const char* name, size_t size, uint32_t num, void* ptr, uint32_t cl_cmdq_id)
         : request(type)
       {
         // TODO: error if type != EXEC
@@ -130,10 +135,23 @@ namespace funky_msg {
         name_size = size;
         arg_num = num;
         args    = (arg_info*) ptr;
+        cmdq_id = cl_cmdq_id;
+      }
+
+      /* for SYNC request */
+      request(ReqType type, uint32_t cl_cmdq_id)
+        : request(type)
+      {
+        // TODO: error if type != SYNC
+        cmdq_id = cl_cmdq_id;
       }
 
       ReqType get_request_type(void) {
         return req_type;
+      }
+
+      int get_cmdq_id(void) {
+        return (cmdq_id >= 0)? (int) cmdq_id: -1;
       }
 
       const char* get_kernel_name(size_t& size) {

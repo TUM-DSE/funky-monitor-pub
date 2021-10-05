@@ -14,6 +14,10 @@
 #include <cstdlib>
 #include <algorithm>
 
+// #include "timer.h" // for evaluation
+
+// TIMER_INIT(3)
+
 namespace funky_backend {
 
   /**
@@ -52,7 +56,7 @@ namespace funky_backend {
     auto trans   = (funky_msg::transfer_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::transfer_info*));
     auto mem_ids = (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) trans->ids, sizeof(int) * trans->num);
 
-    context->enqueue_transfer(mem_ids, trans->num, trans->flags);
+    context->enqueue_transfer(req.get_cmdq_id(), mem_ids, trans->num, trans->flags);
 
     return 0;
   }
@@ -89,7 +93,7 @@ namespace funky_backend {
     }
 
     /* execute the kernel */
-    context->enqueue_kernel(kernel_name);
+    context->enqueue_kernel(req.get_cmdq_id(), kernel_name);
 
     return 0;
   }
@@ -99,11 +103,14 @@ namespace funky_backend {
    */
   int handle_sync_request(struct ukvm_hv *hv, funky_backend::XoclContext* context, funky_msg::request& req)
   {
+    // TIMER_START(2);
     // std::cout << "UKVM: received a SYNC request." << std::endl;
 
-    context->sync_fpga();
+    context->sync_fpga(req.get_cmdq_id());
     context->send_response(funky_msg::SYNC);
+    // TIMER_STOP_ID(2);
 
+    // printf(" %s       : %12.4f ms\n", __func__, TIMER_REPORT_MS(2));
     return 0;
   }
 
