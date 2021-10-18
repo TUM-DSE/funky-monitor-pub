@@ -37,6 +37,8 @@ int is_fpga_worker_alive(void);
 
 /* inter-thread communication via msg queue */
 enum ThrMsgType {
+  // msg from vCPU to Worker
+  MSG_KILLWORKER,
   // msg from Monitor to Worker
   MSG_SAVEFPGA, MSG_LOADFPGA, 
   // msg from Worker to Monitor/vCPU

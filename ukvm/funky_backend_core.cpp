@@ -111,14 +111,27 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
       req = worker.recv_msg();
     }
 
+    /* Handling messages from the other threads (monitor, vCPU) */
+    switch(req->msg_type) {
+      case MSG_KILLWORKER:
+      {
+        // std::cout << "MSG_KILLWORKER request has been received.\n";
+        struct thr_msg end_msg = {MSG_END, NULL, 0};
+        worker.send_msg(end_msg);
+        return; // kill the thread by itself
+      }
+      case MSG_SAVEFPGA:
+        break;
+      default: 
+        std::cout << "Warning: undefined msg type. \n";
+        break;
+    }
+
+    // std::cout << "Worker: received SAVEFPGA request. \n";
+
     /* 
      * start VM (FPGA) migration 
      * */
-    //std::cout << "UKVM worker: start FPGA migration... \n";
-
-    if(req->msg_type != MSG_SAVEFPGA)
-      std::cout << "Warning: msg_type is not SAVEFPGA! \n";
-
     /* handle incoming FPGA requests until a sync point (e.g., just after clFinish()) */
     while(!worker.check_sync_point())
       worker.handle_fpga_requests();
@@ -154,9 +167,18 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
       struct thr_msg data_msg = {MSG_SAVED, save_data.data(), save_data.size()};
       worker.send_msg(data_msg);
 
-      /* wait for being destroyed by vCPU */
+      /* wait for the completion of migration/eviction */
       // TODO: check when save_data is released. 
-      while(true);
+      req = worker.recv_msg();
+      while(req == nullptr)
+        req = worker.recv_msg();
+
+      if(req->msg_type != MSG_KILLWORKER)
+        std::cout << "Warning: received a different req: " << req->msg_type << "\n"; 
+
+      // std::cout << "Worker: going to be killed...\n";
+      struct thr_msg end_msg = {MSG_END, NULL, 0};
+      worker.send_msg(end_msg);
     }
     else {
       // std::cout << "UKVM worker: there's no data to be saved on FPGA. \n";
@@ -174,20 +196,6 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
       );
 }
 
-
-void destroy_fpga_worker()
-{
-  std::cout << "UKVM: destroy a worker thread... (TBD)" << std::endl;
-  fpga_worker.release();
-  msg_read_queue.release();
-  msg_write_queue.release();
-}
-
-int is_fpga_worker_alive()
-{
-  return (fpga_worker)? 1: 0;
-}
-
 // TODO: mutex is necessary?
 struct thr_msg *recv_msg_from_worker()
 {
@@ -203,3 +211,33 @@ int send_msg_to_worker(struct thr_msg *msg)
   auto ret = msg_write_queue->push(*msg);
   return (ret)? 1: 0;
 }
+
+void destroy_fpga_worker()
+{
+  std::cout << "UKVM: destroy a worker thread..." << std::endl;
+
+  /* let the worker thread kill itself */
+  struct thr_msg destroy_req = {MSG_KILLWORKER, NULL, 0};
+  send_msg_to_worker(&destroy_req);
+
+  /* confirm if the worker thread has been killed before releasing msg queues. */
+  // FIXME: the forrowing condition always results in false while the msg_type looks correct... why???
+  auto msg = recv_msg_from_worker();
+  // if(msg->msg_type != MSG_END)
+  //   std::cout << "Warning: received msg is different from the expectation: " << msg->msg_type << "\n"; 
+
+  //   recv_msg = recv_msg_from_worker();
+  // }
+  std::cout << "UKVM: confirm the worker thread is going to be destroyed." << std::endl;
+
+  /* release the smart pointer */
+  msg_read_queue.release();
+  msg_write_queue.release();
+  fpga_worker.release();
+}
+
+int is_fpga_worker_alive()
+{
+  return (fpga_worker)? 1: 0;
+}
+
