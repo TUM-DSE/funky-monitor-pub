@@ -6,6 +6,7 @@ import (
     "net/http"
     "net"
     "log"
+    "strconv"
 )
 
 const SockAddr = "/tmp/front.sock"
@@ -15,7 +16,7 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 
     // Parse our multipart form, 10 << 20 specifies a maximum
     // upload of 10 MB files.
-    r.ParseMultipartForm(10 << 20)
+    r.ParseMultipartForm(1000 << 20)
     // FormFile returns the first file for the given key `myFile`
     // it also returns the FileHeader so we can get the Filename,
     // the Header and the size of the file
@@ -26,13 +27,21 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
         return
     }
     defer file.Close()
+    prioS := r.FormValue("Priority");
+    prio, err := strconv.Atoi(prioS)
+    if err != nil {
+        // handle error
+        fmt.Println(err)
+	return;
+    }
     fmt.Printf("Uploaded File: %+v\n", handler.Filename)
     fmt.Printf("File Size: %+v\n", handler.Size)
     fmt.Printf("MIME Header: %+v\n", handler.Header)
+    fmt.Printf("Priority: %d\n", prio)
 
     // Create a temporary file within our temp-images directory that follows
     // a particular naming pattern
-    tempFile, err := ioutil.TempFile("/tmp/temp-images", "upload-*.ukvm")
+    tempFile, err := ioutil.TempFile("/tmp/", "upload-*.ukvm")
     if err != nil {
         fmt.Println(err)
     }
@@ -54,7 +63,8 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	    log.Fatal("Dial error", err)
     }
 
-    _, err = c.Write([]byte(tempFile.Name()))
+    s := fmt.Sprintf("New: %s priority: %d", tempFile.Name(), prio)
+    _, err = c.Write([]byte(s))
     if err != nil {
 	    log.Fatal("Write error", err)
     }
