@@ -15,6 +15,7 @@
 #include "common.h"
 
 #define BIN_PATH_LEN	254
+#define FRONT_CMD_LEN	300
 
 /*
  * The state of a task. For the time being
@@ -50,10 +51,11 @@ enum msg_type {
 struct task {
 	uint32_t id;
 	char *bin_path;
+	uint8_t priority;
 	enum task_state state;
-	uint32_t node_id;	// Info regarding the node where the task has
-	struct node *node;	// been deployed
+	struct node *node;	// the node where the task has been deployed
 	struct task *next;
+	struct task *prev;
 };
 
 struct node {
@@ -65,8 +67,7 @@ struct node {
 	int ev_fd;
 	int snd_efd;		// eventfd used to send commands to main thread
 	struct in_addr ipv4;;	// ip address of connected node
-	uint32_t task_id;	// Info regarding the task which has been
-	struct task *task;	// deployed in this node
+	struct task *task;	// the task which has been deployed in this node
 	struct node *next;
 };
 
@@ -143,7 +144,7 @@ static char *strdup(const char *s)
 /*
  * Create and initialize an entry for a new task
  */
-static struct task *create_new_task(char *path)
+static struct task *create_new_task(char *path, uint8_t priority)
 {
 	struct task *new_task;
 
@@ -158,9 +159,11 @@ static struct task *create_new_task(char *path)
 		free(new_task);
 		return NULL;
 	}
-	new_task->node_id = 0;
+	new_task->priority = priority;
+	new_task->node = NULL;;
 	new_task->state = ready;
 	new_task->next = NULL;
+	new_task->prev = NULL;
 
 	return new_task;
 }
@@ -173,8 +176,8 @@ static struct task *create_new_task(char *path)
  */
 static void *get_cmd_front(void *arg)
 {
-	int con, rc;
-	char bin_path[BIN_PATH_LEN];
+	int con, rc = 0;
+	char front_cmd[FRONT_CMD_LEN] = {0};
 	struct thr_data *td = (struct thr_data *) arg;
 	struct task *tsk_to_add = NULL;
 	struct notify_msg *nmsg = NULL;
@@ -191,21 +194,27 @@ static void *get_cmd_front(void *arg)
 		return NULL;
 	}
 
-	rc = read(con, bin_path, BIN_PATH_LEN);
+	rc = read(con, front_cmd, FRONT_CMD_LEN);
 	if (rc <= 0) {
 		err_print("Read from peer failed\n");
 		goto exit_front;
 	}
 
 	/*
-	 * Determine if it is a command or a pth to a new binary
+	 * Determine if it is a command or a path to a new binary
 	 * New task should start with '/' since full path is required.
 	 */
-	if (bin_path[0] == '/') {
-		/* Make sure we do not read rubbish, old commands etc */
-		bin_path[(rc > BIN_PATH_LEN) ? BIN_PATH_LEN - 1: rc] = '\0';
+	if (front_cmd[0] == 'N') {
+		uint8_t prior = 2;
+		char path_bin[BIN_PATH_LEN] = {0};
 
-		tsk_to_add = create_new_task(bin_path);
+		rc = sscanf(front_cmd, "New: %s priority: %hhu", path_bin, &prior);
+		if (rc < 2) {
+			err_print("Invalid command\n");
+			goto exit_front;
+		}
+
+		tsk_to_add = create_new_task(path_bin, prior);
 		if (!tsk_to_add) {
 			err_print("Could not create new task\n");
 			goto exit_front;
@@ -228,14 +237,14 @@ static void *get_cmd_front(void *arg)
 			perror("write new task in eventfd");
 			free(nmsg);
 		}
-	} else {
+	} else if (front_cmd[0] == 'T') {
 		uint32_t tsk_ref, node_ref;
 
 		/*
 		 * Read the id of the task which will get migrated and
 		 * the new node ehre the migrated task will resume execution
 		 */
-		rc = sscanf(bin_path, "Task: %u Node: %u", &tsk_ref, &node_ref);
+		rc = sscanf(front_cmd, "Task: %u Node: %u", &tsk_ref, &node_ref);
 		if (rc < 2) {
 			err_print("Invalid command\n");
 			goto exit_front;
@@ -258,6 +267,8 @@ static void *get_cmd_front(void *arg)
 			perror("write new task in eventfd");
 			free(nmsg);
 		}
+	} else {
+		err_print("Received unknown command: %s\n", front_cmd);
 	}
 
 exit_front:
@@ -332,9 +343,8 @@ static void handle_migration_cmd(struct mig_info minfo,struct node *nhead,
 	 */
 	node_tmp->state = busy;
 	node_cur->state = available;
-	node_cur->task_id = 0;
-	tsk_tmp->node_id = node_tmp->id;
-	node_tmp->task_id = tsk_tmp->id;
+	node_cur->task = NULL;
+	tsk_tmp->node = node_tmp;
 	node_tmp->task = tsk_tmp;
 }
 
@@ -465,6 +475,7 @@ static struct node *create_new_node(struct thr_data *td, int sfd)
 		err_print("Out of memory\n");
 		return NULL;;
 	}
+	memset(nd, 0, sizeof(struct node));
 	/*
 	 * Get ip of the new node
 	 */
@@ -477,7 +488,6 @@ static struct node *create_new_node(struct thr_data *td, int sfd)
 	}
 	nd->ipv4 = saddr_node.sin_addr;
 	nd->thr = pthread_self();
-	nd->task_id = 0;
 	nd->task = NULL;
 	nd->ev_fd = td->rcv_efd;
 	nd->snd_efd = td->snd_efd;
@@ -722,31 +732,40 @@ err_handle:
 /*
  * Remove a task from the task list.
  */
-static void remove_task(struct task **hd, struct task **lst, uint32_t id)
+static inline void remove_task(struct task **thd, struct task **tlst,
+			struct task *task_tmp)
 {
-	struct task *task_tmp = *hd, *task_prev = NULL;
+	struct task *tsk_head = *thd;
+	struct task *tsk_last = *tlst;
+	//struct task *task_tmp = *trmv;
 
-	while(task_tmp) {
-		if (task_tmp->id == id) {
-			if (task_tmp == *lst)
-				*lst = task_prev;
-			if (task_prev == NULL)
-				*hd = task_tmp->next;
-			else
-				task_prev->next = task_tmp->next;
-			if (task_tmp->node) {
-				task_tmp->node->state = available;
-				task_tmp->node->task = NULL;
-			}
-			printf("%d ", task_tmp->id);
-			free(task_tmp->bin_path);
-			free(task_tmp);
-			return;
-		}
-		task_prev = task_tmp;
-		task_tmp = task_tmp->next;
+	if (task_tmp->id == tsk_head->id)
+		tsk_head = task_tmp->next;
+	if (task_tmp->id == tsk_last->id)
+		tsk_last = task_tmp->prev;
+	*thd = tsk_head;
+	*tlst = tsk_last;
+	return;
+}
+
+/*
+ * Insert a task in a task list.
+ */
+static inline void insert_task(struct task **thd, struct task **tlst,
+				struct task *new)
+{
+	struct task *tsk_head = *thd;
+	struct task *tsk_last = *tlst;
+
+	if (tsk_head == NULL) {
+		tsk_head = tsk_last = new;
+	} else {
+		tsk_last->next = new;
+		new->prev = tsk_last;
+		tsk_last = new;
 	}
-
+	*thd = tsk_head;
+	*tlst = tsk_last;
 	return;
 }
 
@@ -795,7 +814,7 @@ static void scheduler_algorithm(struct node *nhead, struct task *thead,
 	node_tmp = nhead;
 	while(node_tmp) {
 		printf("Node with id %d state %d\n", node_tmp->id, node_tmp->state);
-		if (node_tmp->state == available && !node_avail)
+		if ((node_tmp->state == available) && !node_avail)
 			node_avail = node_tmp;
 		node_tmp = node_tmp->next;
 	}
@@ -803,8 +822,8 @@ static void scheduler_algorithm(struct node *nhead, struct task *thead,
 	printf("----------------- Tasks ----------------\n");
 	tsk_tmp = thead;
 	while(tsk_tmp) {
-		printf("Task id %d with state %d and bin at %s\n", tsk_tmp->id,tsk_tmp->state , tsk_tmp->bin_path);
-		if (tsk_tmp->state == ready && !tsk_avail)
+		printf("Task id %d with state %d, priority %hhu and bin at %s\n", tsk_tmp->id,tsk_tmp->state, tsk_tmp->priority, tsk_tmp->bin_path);
+		if ((tsk_tmp->state == ready) && !tsk_avail)
 			tsk_avail = tsk_tmp;;
 		tsk_tmp = tsk_tmp->next;
 	}
@@ -817,7 +836,8 @@ int main()
 {
 	uint32_t nr_tsks = 1;
 	struct node *node_head = NULL, *node_last = NULL;
-	struct task *tsk_head = NULL, *tsk_last = NULL;
+	struct task *htsk_head = NULL, *htsk_last = NULL;
+	struct task *ltsk_head = NULL, *ltsk_last = NULL;
 	struct epoll_event events[MAX_EVENTS];
 	int rc = 0, epoll_ret, epollfd, front_sock, nodes_sock;
 	struct sockaddr_un saddr_un = {0};
@@ -909,12 +929,13 @@ int main()
 				break;
 			case task_new:
 				new_msg->tsk->id = nr_tsks++;
-				if (tsk_head == NULL) {
-					tsk_head = tsk_last = new_msg->tsk;
-				} else {
-					tsk_last->next = new_msg->tsk;
-					tsk_last = new_msg->tsk;
-				}
+
+				if (new_msg->tsk->priority == 0)
+					insert_task(&htsk_head, &htsk_last,
+							new_msg->tsk);
+				else if (new_msg->tsk->priority == 1)
+					insert_task(&ltsk_head, &ltsk_last,
+							new_msg->tsk);
 				close(events[i].data.fd);
 				break;
 			case node_down:
@@ -924,6 +945,7 @@ int main()
 				break;
 			case node_ret:
 				struct node *node_tmp;
+				struct task *task_tmp;
 
 				node_tmp = node_head;
 				while (node_tmp) {
@@ -936,16 +958,33 @@ int main()
 					err_print("I could not find node..\n");
 					goto fail_socs;
 				}
-				printf("Task with id ");
-				remove_task(&tsk_head, &tsk_last, node_tmp->task_id);
+				task_tmp = node_tmp->task;
+				node_tmp->state = available;
+				node_tmp->task = NULL;
+
+				if (task_tmp->next != NULL)
+					task_tmp->next->prev = task_tmp->prev;
+				if (task_tmp->prev != NULL) {
+					task_tmp->prev->next = task_tmp->next;
+				}
+				printf("Task with id %d ", task_tmp->id);
 				if (new_msg->nres.res == 4)
 					printf("terminated successfully\n");
 				else if (new_msg->nres.res == 5)
 					printf("failed\n");
+				if (task_tmp->priority == 0) {
+					remove_task(&htsk_head, &htsk_last,
+							task_tmp);
+				}else if (task_tmp->priority == 1) {
+					remove_task(&ltsk_head, &ltsk_last,
+							task_tmp);
+				}
+				free(task_tmp->bin_path);
+				free(task_tmp);
 				break;
 			case migration:
 				handle_migration_cmd(new_msg->migr_info,
-						     node_head, tsk_head);
+						     node_head, htsk_head);
 				close(events[i].data.fd);
 				break;
 			default:
@@ -956,7 +995,15 @@ int main()
 			free(new_msg);
 		}
 
-		scheduler_algorithm(node_head, tsk_head, &node_avail, &tsk_avail);
+		if (htsk_last != NULL) {
+			htsk_last->next = ltsk_head;
+			scheduler_algorithm(node_head, htsk_head, &node_avail,
+					&tsk_avail);
+			htsk_last->next = NULL;
+		} else {
+			scheduler_algorithm(node_head, ltsk_head, &node_avail,
+					&tsk_avail);
+		}
 		if (!tsk_avail || !node_avail)
 			continue;
 		/*
@@ -979,11 +1026,10 @@ int main()
 
 		tsk_avail->state = running;
 		tsk_avail->node = node_avail;
-		tsk_avail->node_id = node_avail->id;
-		node_avail->task_id = tsk_avail->id;
 		node_avail->task = tsk_avail;
 		node_avail->state = busy;
-
+		if (nr_tsks == 10)
+			break;
 	}
 
 	return 0;
