@@ -15,6 +15,8 @@
 enum mnode_type {
 	deploy = 0,
 	mig_cmd,
+	evict,
+	resume,
 	migrate
 };
 

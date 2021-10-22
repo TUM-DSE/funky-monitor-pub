@@ -34,6 +34,7 @@ enum task_state {
  */
 enum node_state {
 	available = 0,
+	low_prio,
 	busy
 };
 
@@ -66,8 +67,9 @@ struct node {
 	// eventfd used to send commands to the worker thead
 	int ev_fd;
 	int snd_efd;		// eventfd used to send commands to main thread
-	struct in_addr ipv4;;	// ip address of connected node
+	struct in_addr ipv4;	// ip address of connected node
 	struct task *task;	// the task which has been deployed in this node
+	struct task *ev_task;	// the task which has been deployed in this node but got evicted
 	struct node *next;
 };
 
@@ -76,7 +78,7 @@ struct node {
  * The thr field is used to identify the node where the task was running
  */
 struct node_result {
-	pthread_t thr;
+	struct node *node;
 	int res;
 };
 
@@ -349,6 +351,27 @@ static void handle_migration_cmd(struct mig_info minfo,struct node *nhead,
 }
 
 /*
+ * Send resume command to the node where task was stopped
+ */
+static ssize_t send_resume_command(int socket)
+{
+	ssize_t rc;
+	struct com_nod nod_com;
+
+	nod_com.type = resume;
+
+	rc = write(socket, &nod_com, sizeof(struct com_nod));
+	if (rc < sizeof(struct com_nod)) {
+		if (rc < 0)
+			perror("Send resume command");
+		else
+			err_print("Short send of resume command\n");
+		return -1;
+	}
+	return 0;
+}
+
+/*
  * Send migration command to the node where task is currently tunning
  * Primary scheduler does not get involved in the migration process.
  * The current node will receive the migration and command, request ukvm
@@ -379,7 +402,8 @@ static ssize_t send_migration_command(struct node *nd, int socket)
  * - An event from the connected node
  * - A new command from main thread
  */
-static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd)
+static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd,
+				struct node *nd)
 {
 	int rc;
 	int epoll_ret, i;
@@ -423,7 +447,7 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd)
 				return -1;
 			}
 			nmsg->type = node_ret;
-			nmsg->nres.thr = pthread_self();
+			nmsg->nres.node = nd;
 			nmsg->nres.res = node_msg;
 
 			rc = write(snd_efd, &nmsg, sizeof(uint64_t));
@@ -449,6 +473,10 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd)
 				rc = send_file(con, msg_node->tsk->bin_path, deploy);
 			else if (msg_node->type == migrate)
 				rc = send_migration_command(msg_node->node, con);
+			else if (msg_node->type == resume)
+				rc = send_resume_command(con);
+			else if (msg_node->type == evict)
+				rc = send_file(con, msg_node->tsk->bin_path, evict);
 			free(msg_node);
 			if (rc < 0)
 				return -1;
@@ -489,6 +517,7 @@ static struct node *create_new_node(struct thr_data *td, int sfd)
 	nd->ipv4 = saddr_node.sin_addr;
 	nd->thr = pthread_self();
 	nd->task = NULL;
+	nd->ev_task = NULL;
 	nd->ev_fd = td->rcv_efd;
 	nd->snd_efd = td->snd_efd;
 	nd->state = available;
@@ -569,7 +598,7 @@ static void *node_communication(void *arg)
 
 	while(1)
 	{
-		rc = handle_node_comm(epollfd, con, td->rcv_efd, td->snd_efd);
+		rc = handle_node_comm(epollfd, con, td->rcv_efd, td->snd_efd, nd);
 		if (rc < 0)
 			goto err_node;
 	}
@@ -587,7 +616,7 @@ err_node:
 		goto err_node2;
 	}
 	nmsg->type = node_down;
-	nmsg->nres.thr = pthread_self();
+	nmsg->node = nd;
 
 	rc = write(td->snd_efd, &nmsg, sizeof(uint64_t));
 	if (rc < 0)
@@ -772,13 +801,13 @@ static inline void insert_task(struct task **thd, struct task **tlst,
 /*
  * Remove a node from the node list.
  */
-static void remove_node(struct node **hd, struct node **lst, pthread_t ref)
+static void remove_node(struct node **hd, struct node **lst, struct node *nd)
 {
 
 	struct node *node_tmp = *hd, *node_prev = NULL;
 
 	while(node_tmp) {
-		if (node_tmp->thr == ref) {
+		if (node_tmp->thr == nd->thr) {
 			if (node_tmp == *lst)
 				*lst = node_prev;
 			if (node_prev == NULL)
@@ -808,28 +837,41 @@ static void scheduler_algorithm(struct node *nhead, struct task *thead,
 				struct node **pick_n, struct task **pick_t)
 {
 	struct node *node_tmp = NULL, *node_avail = NULL;
+	struct node *node_prior = NULL;
 	struct task *tsk_tmp = NULL, *tsk_avail = NULL;
 
+	printf("----------------- Tasks ----------------\n");
+	tsk_tmp = thead;
+	while(tsk_tmp) {
+		printf("Task id %d with state %d, priority %hhu and bin at %s\n", tsk_tmp->id,tsk_tmp->state, tsk_tmp->priority, tsk_tmp->bin_path);
+		if (tsk_tmp->state == stopped && tsk_tmp->node->state == available) {
+			tsk_avail = tsk_tmp;
+			node_avail = tsk_tmp->node;
+		}
+		if ((tsk_tmp->state == ready) && !tsk_avail)
+			tsk_avail = tsk_tmp;
+		tsk_tmp = tsk_tmp->next;
+	}
+	printf("----------------------------------------\n");
 	printf("----------------- Nodes ----------------\n");
 	node_tmp = nhead;
 	while(node_tmp) {
 		printf("Node with id %d state %d\n", node_tmp->id, node_tmp->state);
+		if ((node_tmp->state == low_prio) && !node_prior)
+			node_prior = node_tmp;
 		if ((node_tmp->state == available) && !node_avail)
 			node_avail = node_tmp;
 		node_tmp = node_tmp->next;
 	}
 	printf("----------------------------------------\n");
-	printf("----------------- Tasks ----------------\n");
-	tsk_tmp = thead;
-	while(tsk_tmp) {
-		printf("Task id %d with state %d, priority %hhu and bin at %s\n", tsk_tmp->id,tsk_tmp->state, tsk_tmp->priority, tsk_tmp->bin_path);
-		if ((tsk_tmp->state == ready) && !tsk_avail)
-			tsk_avail = tsk_tmp;;
-		tsk_tmp = tsk_tmp->next;
-	}
-	printf("----------------------------------------\n");
 	*pick_n = node_avail;
 	*pick_t = tsk_avail;
+	if (!tsk_avail)
+		return;
+	if (node_avail)
+		return;
+	if (tsk_avail->priority == 0 && node_prior != NULL)
+		*pick_n = node_prior;
 }
 
 int main()
@@ -940,24 +982,14 @@ int main()
 				break;
 			case node_down:
 				printf("Node with id ");
-				remove_node(&node_head, &node_last, new_msg->nres.thr);
+				remove_node(&node_head, &node_last, new_msg->nres.node);
 				printf("went down\n");
 				break;
 			case node_ret:
 				struct node *node_tmp;
 				struct task *task_tmp;
 
-				node_tmp = node_head;
-				while (node_tmp) {
-					if (node_tmp->thr == new_msg->nres.thr)
-						break;
-					node_tmp = node_tmp->next;
-
-				}
-				if (!node_tmp) {
-					err_print("I could not find node..\n");
-					goto fail_socs;
-				}
+				node_tmp = new_msg->nres.node;;
 				task_tmp = node_tmp->task;
 				node_tmp->state = available;
 				node_tmp->task = NULL;
@@ -1006,6 +1038,7 @@ int main()
 		}
 		if (!tsk_avail || !node_avail)
 			continue;
+		printf("task: %d node %d\n", tsk_avail->id, node_avail->id);
 		/*
 		 * Deploy
 		 */
@@ -1014,7 +1047,12 @@ int main()
 			err_print("Out of memory\n");
 			goto fail_socs;
 		}
-		msg_work->type = deploy;
+		if (tsk_avail->priority == 0 && node_avail->state == low_prio)
+			msg_work->type = evict;
+		else if (tsk_avail->state == stopped)
+			msg_work->type = resume;
+		else
+			msg_work->type = deploy;
 		msg_work->tsk = tsk_avail;
 
 		rc = write(node_avail->ev_fd, &msg_work, sizeof(uint64_t));
@@ -1026,10 +1064,17 @@ int main()
 
 		tsk_avail->state = running;
 		tsk_avail->node = node_avail;
+		if (tsk_avail->priority == 0)
+			node_avail->state = busy;
+		else if (tsk_avail->priority == 1)
+			node_avail->state = low_prio;
+		else 
+			err_print("I should not be here\n");
+		if (node_avail->task != NULL) {
+			node_avail->task->state = stopped;
+			node_avail->ev_task = node_avail->task;
+		}
 		node_avail->task = tsk_avail;
-		node_avail->state = busy;
-		if (nr_tsks == 10)
-			break;
 	}
 
 	return 0;

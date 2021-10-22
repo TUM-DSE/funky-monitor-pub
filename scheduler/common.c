@@ -76,7 +76,7 @@ int send_file(int socket, const char *filename, enum mnode_type msg_type)
 	int rc = 0, fd;
 	struct stat st;
 	ssize_t n, count = 0;
-	struct com_nod node_com;
+	struct com_nod node_com = {0};
 
 	fd = open(filename, O_RDONLY);
 	if (fd < 0) {

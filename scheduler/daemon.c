@@ -26,6 +26,12 @@
 
 static struct in_addr to_node;
 
+struct ukvm_ps {
+	pid_t pid;
+	char socket[30];
+	char binary[30];
+};
+
 /*
  * Write exactly <size> bytes to the file pointed  by <file>
  */
@@ -134,7 +140,7 @@ static void transmit_mig_file()
 
 	memcpy(&addr.sin_addr, &to_node, sizeof(struct in_addr));
 	addr.sin_family = AF_INET;
-	addr.sin_port = htons(PORT_NODES);
+	addr.sin_port = htons(PORT_NODES+1);
 	sockfd = setup_socket(0, (struct sockaddr *) &addr, 0);
 	if (sockfd == -1) {
 		err_print("socket error %d\n", errno);
@@ -154,7 +160,8 @@ static void transmit_mig_file()
  * Start a new guest using solo5. The flag mig is used to start
  * a migrated guest.
  */
-static int start_guest(uint8_t mig)
+static int start_guest(const char *mig_arg, const char *guest_bin,
+			const char *net_arg, const char *mon_arg)
 {
 	int pid;
 
@@ -166,7 +173,9 @@ static int start_guest(uint8_t mig)
 		int fd;
 		char *ukvm_bin = NULL;
 		char out_file[24];
+		char disk_arg[32] = "--disk=";
 
+		strcat(disk_arg, guest_bin);
 		ukvm_bin = getenv("UKVM_BIN");
 		if (!ukvm_bin) {
 			err_print("UKVM_BIN environment variable has not been set\n");
@@ -176,7 +185,7 @@ static int start_guest(uint8_t mig)
 		fd = open(out_file, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
 		if (fd < 0) {
 			perror("Opening redirected file\n");
-			exit(1);
+			exit(EXIT_FAILURE);
 		}
 		/*
 		 * Redirect both stderr and stdout to the output file
@@ -185,20 +194,19 @@ static int start_guest(uint8_t mig)
 		if (dup2(fd, 1) < 0) {
 			perror("Redirecting stdout\n");
 			close(fd);
-			exit(1);
+			exit(EXIT_FAILURE);
 		}
 		if (dup2(fd, 2) < 0) {
 			perror("Redirecting stderr\n");
 			close(fd);
-			exit(1);
+			exit(EXIT_FAILURE);
 		}
-		if (!mig) {
-			char *const  e_args[] = {ukvm_bin, "--net=tap0", "--disk="GUEST_BIN_PATH, "--mon="UKVM_SOC, GUEST_BIN_PATH, NULL};
-			execv(ukvm_bin, e_args);
-		} else {
-			char *const  e_args[] = {ukvm_bin, "--net=tap0", "--disk="GUEST_BIN_PATH, "--mon="UKVM_SOC, "--load=/tmp/file.mig", GUEST_BIN_PATH, NULL};
-			execv(ukvm_bin, e_args);
-		}
+		if (mig_arg)
+			execl(ukvm_bin, ukvm_bin, net_arg, disk_arg, mig_arg, mon_arg,
+				guest_bin, (char *)NULL);
+		else
+			execl(ukvm_bin, ukvm_bin, net_arg, disk_arg, mon_arg,
+				guest_bin, (char *)NULL);
 	} else if (pid == -1) {
 		perror("fork");
 		return -1;
@@ -207,73 +215,126 @@ static int start_guest(uint8_t mig)
 	return pid;
 }
 
+static int send_ukvm_cmd(const char *cmd, const char *soc_pth)
+{
+	struct sockaddr_un addr = {0};
+	int sockfd;
+	int rc;
+
+	/*
+	 * Send migration command
+	 */
+	addr.sun_family = AF_UNIX;
+	strcpy(addr.sun_path, soc_pth);
+	sockfd = setup_socket(0, (struct sockaddr *) &addr, 0);
+	if (sockfd < 0) {
+		perror("Create socket to send commands to ukvm");
+		return -1;
+	}
+
+	rc = write(sockfd, cmd, sizeof(cmd));
+	if (rc < sizeof(cmd)) {
+		if (rc < 0)
+			perror("write to ukvm socket");
+		else
+			err_print("Short write to ukvm socket\n");
+		close(sockfd);
+		return -1;
+	}
+	close(sockfd);
+	return 0;
+}
+
 /*
  * Handle new message from primary scheduler
  */
-static int msg_from_primary(int socket)
+static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 {
 	int rc;
 	uint8_t *buf;
 	struct com_nod node_com;
+	struct ukvm_ps *ps_ukvm = NULL;
+	*ret = 3;
+
+	ps_ukvm = malloc(sizeof(struct ukvm_ps));
+	if (ps_ukvm == NULL) {
+		err_print("Out of memory\n");
+		goto ret_1;
+	}
 
 	rc = read(socket, &node_com, sizeof(struct com_nod));
 	if (rc <= 0) {
 		err_print("Lost connection with primary scheduler\n");
 		if (rc < 0)
 			perror("Read message from primary\n");
-		return -1;
+		goto ret_1;
 	} else if (rc < sizeof(struct com_nod)) {
 		err_print("Short read on primary's message\n");
-		return -1;
+		goto ret_1;
 	}
 	if (node_com.type == deploy) {
-		pid_t cpid;
-
+		memset(ps_ukvm->socket, 0, 30*sizeof(char));
+		memset(ps_ukvm->binary, 0, 30*sizeof(char));
 		/*
 		 * Receive and store the binary to deploy
 		 */
 		buf = read_file_n(socket, node_com.size);
 		if (!buf)
-			return -1;
+			goto ret_1;
 
-		// TODO: we might want to change the name of the file
-		rc = write_file_n(buf, node_com.size, GUEST_BIN_PATH);
+		sprintf(ps_ukvm->binary, "/tmp/binary_0.ukvm");
+		sprintf(ps_ukvm->socket, "--mon=/tmp/ukvm0.sock");
+		rc = write_file_n(buf, node_com.size, ps_ukvm->binary);
 		free(buf);
 		if (rc < 0)
-			return -1;
+			goto ret_1;
 		// start new task
-		cpid = start_guest(0);
-		if (cpid < 0)
-			return -1;
-		printf("Started ukvm guest with pid %d\n", cpid);
-	} else if (node_com.type == mig_cmd) {
-		struct sockaddr_un addr = {0};
-		int sockfd;
-
+		ps_ukvm->pid = start_guest(NULL, ps_ukvm->binary, "--net=tap0",
+					   ps_ukvm->socket);
+		if (ps_ukvm->pid < 0)
+			goto ret_1;
+		printf("Started ukvm guest with pid %d\n", ps_ukvm->pid);
+		*ret = 0;
+	} else if (node_com.type == evict) {
+		memset(ps_ukvm->socket, 0, 30*sizeof(char));
+		memset(ps_ukvm->binary, 0, 30*sizeof(char));
 		/*
-		 * Send migration command
+		 * Receive and store the binary to deploy
 		 */
-		addr.sun_family = AF_UNIX;
-		strcpy(addr.sun_path, UKVM_SOC);
-		sockfd = setup_socket(0, (struct sockaddr *) &addr, 0);
-		if (sockfd < 0) {
-			perror("Create socket to send migration command");
-			return -1;
-		}
+		buf = read_file_n(socket, node_com.size);
+		if (!buf)
+			goto ret_1;
 
-		rc = write(sockfd, "savevm /tmp/file.mig", 20);
-		if (rc < 20) {
-			if (rc < 0)
-				perror("write to ukvm socket");
-			else
-				err_print("Short write to ukvm socket\n");
-			close(sockfd);
-			return -1;
-		}
-		close(sockfd);
+		sprintf(ps_ukvm->binary, "/tmp/binary_1.ukvm");
+		sprintf(ps_ukvm->socket, "--mon=/tmp/ukvm1.sock");
+		rc = write_file_n(buf, node_com.size, ps_ukvm->binary);
+		free(buf);
+		if (rc < 0)
+			goto ret_1;
+		// Stop current task
+		if (send_ukvm_cmd("stop", "/tmp/ukvm0.sock") < 0)
+			goto ret_1;
+		// start new task
+		ps_ukvm->pid = start_guest(NULL, ps_ukvm->binary, "--net=tap1",
+					   ps_ukvm->socket);
+		if (ps_ukvm->pid < 0)
+			goto ret_1;
+		printf("Started ukvm guest with pid %d\n", ps_ukvm->pid);
+		*ret = 1;
+	} else if (node_com.type == resume) {
+		if (send_ukvm_cmd("resume", "/tmp/ukvm0.sock") < 0)
+			goto ret_1;
+		*ret = 3;
+	} else if (node_com.type == mig_cmd) {
+		if (send_ukvm_cmd("savevm /tmp/file.mig", "/tmp/ukvm0.sock") < 0)
+			goto ret_1;
 		to_node = node_com.rcv_ip;
+		*ret = 3;
 	}
-	return 0;
+	return ps_ukvm;
+ret_1:
+	*ret = -1;
+	return NULL;
 }
 
 /*
@@ -352,7 +413,8 @@ static int msg_from_anode(int server_soc)
 	/*
 	 * Start the migrated guest.
 	 */
-	if (start_guest(1) < 0)
+	if(start_guest("/tmp/file.mig", "/tmp/binary.ukvm", "--net=tap0",
+				"--mon="UKVM_SOC) < 0)
 		return -1;
 	printf("Started ukvm with migrated guest\n");
 
@@ -385,6 +447,7 @@ int main(int argc, char *argv[])
 	char *ip_addr = NULL;
 	struct epoll_event ev;
 	sigset_t schld_set;
+	struct ukvm_ps *instance = NULL;
 
 	/*
 	 * Get ip address and port of the primary scheduler
@@ -473,7 +536,6 @@ int main(int argc, char *argv[])
 	 */
 	while(1)
 	{
-
 		int epoll_ret, i;
 		struct epoll_event events[3];
 		/*
@@ -493,7 +555,7 @@ int main(int argc, char *argv[])
 		for (i = 0; i < epoll_ret; i++) {
 
 			if (events[i].data.fd == sched_sock) {
-				rc = msg_from_primary(sched_sock);
+				instance = msg_from_primary(sched_sock, &rc);
 				if (rc < 0)
 					goto out_sfd;
 			} else if (events[i].data.fd == sfd) {
@@ -505,6 +567,8 @@ int main(int argc, char *argv[])
 				if (rc == 7)
 					transmit_mig_file();
 				// report execution result to primary
+				free(instance);
+				instance = NULL;
 				if (send_deploy_res(sched_sock, rc) < 0)
 					goto out_socs;
 			} else if (events[i].data.fd == server_soc) {
