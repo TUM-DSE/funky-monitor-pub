@@ -20,6 +20,7 @@
 namespace funky_msg {
   enum ReqType {MEMORY, TRANSFER, EXECUTE, SYNC};
   enum MemType {BUFFER, PIPE, IMAGE};
+  enum TransType {MIGRATE, WRITE, READ};
 
   /**
    * mem_info is used to initialize memory objects on FPGA with input/output data.
@@ -44,12 +45,23 @@ namespace funky_msg {
    *
    * */
   struct transfer_info {
-    int* ids; /* ids of memory to be transferred */
-    size_t num; /* number of memory to be transferred */
-    uint64_t flags; /* host to device, or device to host */
+    TransType trans;  /* transfer type */
+    int* ids;         /* ids of memory to be transferred */
+    size_t num;       /* number of memory to be transferred */
+    uint64_t flags;   /* migrate: host to device, or device to host 
+                         write/read: blocking or non-blocking */
+    size_t offset;    /* for write/read */
+    size_t size;      /* for write/read */
+    const void* ptr;  /* for write/read */
 
-    transfer_info(int* mem_ids, size_t mem_num, uint64_t trans_flags)
-      : ids(mem_ids), num(mem_num), flags(trans_flags)
+    /* MIGRATE transfers */
+    transfer_info(TransType trans_type, int* mem_ids, size_t mem_num, uint64_t trans_flags)
+      : trans(trans_type), ids(mem_ids), num(mem_num), flags(trans_flags)
+    {}
+
+    /* READ/WRITE transfers */
+    transfer_info(TransType trans_type, int* mem_ids, size_t mem_num, uint64_t trans_flags, size_t obj_offset, size_t host_size, const void* host_ptr)
+      : trans(trans_type), ids(mem_ids), num(mem_num), flags(trans_flags), offset(obj_offset), size(host_size), ptr(host_ptr)
     {}
   };
 

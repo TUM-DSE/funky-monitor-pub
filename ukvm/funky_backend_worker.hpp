@@ -6,6 +6,7 @@
 
 #include "backend/buffer.hpp"
 #include "backend/funky_msg.hpp"
+#include "funky_debug.h"
 
 #include <iostream>
 #include <thread>
@@ -37,8 +38,8 @@ namespace funky_backend {
       auto m = (funky_msg::mem_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) mems[i], sizeof(funky_msg::mem_info));
       // std::cout << "mems[" << i << "], id: " << m->id << ", addr: " << m->src << ", size: " << m->size << std::endl;
 
-      void* src = UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) m->src, m->size);
-      context->create_buffer(m->id, m->flags, m->size, src, m->src);
+      void* host_ptr = (m->src == nullptr)? nullptr: UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) m->src, m->size);
+      context->create_buffer(m->id, m->flags, m->size, host_ptr, m->src);
     }
 
     return 0;
@@ -56,7 +57,16 @@ namespace funky_backend {
     auto trans   = (funky_msg::transfer_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::transfer_info*));
     auto mem_ids = (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) trans->ids, sizeof(int) * trans->num);
 
-    context->enqueue_transfer(req.get_cmdq_id(), mem_ids, trans->num, trans->flags);
+    /* MIGRATE or READ/WRITE */
+    if(trans->trans == funky_msg::MIGRATE) {
+      context->enqueue_transfer(req.get_cmdq_id(), mem_ids, trans->num, trans->flags);
+    }
+    else {
+      DEBUG_STREAM("received Read/Write request. ");
+      bool is_write = (trans->trans == funky_msg::WRITE)? true: false;
+      auto host_ptr = (void*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) trans->ptr, sizeof(uint8_t) * trans->size);
+      context->enqueue_transfer(req.get_cmdq_id(), mem_ids, trans->num, trans->flags, trans->offset, trans->size, host_ptr, is_write);
+    }
 
     return 0;
   }
@@ -67,6 +77,7 @@ namespace funky_backend {
   int handle_exec_request(struct ukvm_hv *hv, funky_backend::XoclContext* context, funky_msg::request& req)
   {
     // std::cout << "UKVM: received an EXECUTE request." << std::endl;
+    DEBUG_STREAM("received EXEC request. ");
 
     /* read arginfo from the guest memory */
     int arg_num=0;

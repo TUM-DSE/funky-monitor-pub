@@ -222,7 +222,8 @@ void destroy_fpga_worker()
 
   /* confirm if the worker thread has been killed before releasing msg queues. */
   // FIXME: the forrowing condition always results in false while the msg_type looks correct... why???
-  auto msg = recv_msg_from_worker();
+  // auto msg = recv_msg_from_worker();
+  recv_msg_from_worker();
   // if(msg->msg_type != MSG_END)
   //   std::cout << "Warning: received msg is different from the expectation: " << msg->msg_type << "\n"; 
 

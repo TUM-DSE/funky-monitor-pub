@@ -8,6 +8,7 @@
 // TODO: change file name to funky_msg.hpp
 #include "backend/buffer.hpp"
 #include "backend/funky_msg.hpp"
+#include "funky_debug.h"
 
 #include "ukvm.h" // UKVM_CHECKED_GPA_P()
 
@@ -152,10 +153,15 @@ namespace funky_backend {
       {
         cl_int err;
 
-        // TODO: search for the kernel map and if the same kernel already exists, skip the creation and use the existing one. 
+        auto search = kernels.find(kernel_name);
+        if(search == kernels.end()) {
+          /* use kernel name as an index */
+          OCL_CHECK(err, kernels.emplace(kernel_name, cl::Kernel(*program, kernel_name, &err)));
+          return;
+        }
 
-        /* use kernel name as an index */
-        OCL_CHECK(err, kernels.emplace(kernel_name, cl::Kernel(*program, kernel_name, &err)));
+        // if the same kernel already exists, skip the creation and use the existing one. 
+        DEBUG_STREAM("The specified kernel " << kernel_name << " is found. Nothing is done here. ");
       }
 
       /**
@@ -187,13 +193,13 @@ namespace funky_backend {
       /**
        * launch the kernel 
        */
-      void enqueue_kernel(int msgq_id, const char* kernel_name)
+      void enqueue_kernel(int cmdq_id, const char* kernel_name)
       {
         cl_int err;
         auto id = kernel_name;
 
         /* create a cmd queue if not exists */
-        auto queue_in_map = queues.find(msgq_id);
+        auto queue_in_map = queues.find(cmdq_id);
         if(queue_in_map == queues.end()) {
           // auto devices = xcl::get_xil_devices();
           // if(devices.size() == 0) {
@@ -201,14 +207,14 @@ namespace funky_backend {
           // }
           // auto device = devices[0];
 
-          OCL_CHECK(err,  queues.emplace(msgq_id, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
-          std::cout << "UKVM: new cmd queue (id: " << msgq_id << ") is created. " << std::endl;
+          OCL_CHECK(err,  queues.emplace(cmdq_id, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
+          DEBUG_STREAM("UKVM: new cmd queue (id: " << cmdq_id << ") is created. ");
         }
 
         /* TODO: support for enqueueNDRangeKernel() */
         // For HLS kernels global and local size is always (1,1,1). So, it is recommended
         // to always use enqueueTask() for invoking HLS kernel
-        OCL_CHECK(err, err = queues[msgq_id].enqueueTask(kernels[id]));
+        OCL_CHECK(err, err = queues[cmdq_id].enqueueTask(kernels[id]));
 
         sync_flag = false;
         updated_flag = true;
@@ -221,24 +227,23 @@ namespace funky_backend {
        * @param (flags)   : 0 means from host, CL_MIGRATE_MEM_OBJECT_HOST means to host 
        *                     cl_mem_migration_flags, a bitfield based on unsigned int64
        */
-      void enqueue_transfer(int msgq_id, int mem_ids[], size_t id_num, uint64_t flags)
+      void enqueue_transfer(int cmdq_id, int mem_ids[], size_t id_num, uint64_t flags)
       {
         /* create a cmd queue if not exists */
-        auto queue_in_map = queues.find(msgq_id);
+        auto queue_in_map = queues.find(cmdq_id);
         if(queue_in_map == queues.end()) {
           cl_int err;
-          OCL_CHECK(err,  queues.emplace(msgq_id, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
-          std::cout << "UKVM: new cmd queue (id: " << msgq_id << ") is created. " << std::endl;
+          OCL_CHECK(err,  queues.emplace(cmdq_id, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
+          DEBUG_STREAM("UKVM: new cmd queue (id: " << cmdq_id << ") is created. ");
         }
 
         for(size_t i=0; i<id_num; i++)
         {
-
           // TODO: consider when enqueueReadBuffer or enqueueWriteBuffer is called
           cl_int err;
           auto id = mem_ids[i];
           // OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
-          OCL_CHECK(err, err = queues[msgq_id].enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
+          OCL_CHECK(err, err = queues[cmdq_id].enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
 
           /* 0 means data transfers from Host to FPGA */
           if( flags == 0 )
@@ -248,6 +253,49 @@ namespace funky_backend {
         sync_flag = false;
         updated_flag = true;
       }
+
+      /**
+       * Launch data transfer (Read/Write) between Device Global memory and Host Local Memory 
+       *
+       * @param (mem_ids) : vector containing IDs of cl_mem objects being transferred from/to Host
+       * @param (flags)   : indicates blocking or non-blocking read/write.
+       * @param (offset)  : offset of the memory object where to be read from or written to.
+       * @param (size)    : size of data in host memory. 
+       * @param (ptr)     : a pointer to host memory where data is read from or written to.
+       *
+       */
+      void enqueue_transfer(int cmdq_id, int mem_ids[], size_t id_num, uint64_t flags, size_t offset, size_t size, void *ptr, bool is_write)
+      {
+        /* create a cmd queue if not exists */
+        auto queue_in_map = queues.find(cmdq_id);
+        if(queue_in_map == queues.end()) {
+          cl_int err;
+          OCL_CHECK(err,  queues.emplace(cmdq_id, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
+          DEBUG_STREAM("UKVM: new cmd queue (id: " << cmdq_id << ") is created. ");
+        }
+
+        for(size_t i=0; i<id_num; i++)
+        {
+          // TODO: consider when enqueueReadBuffer or enqueueWriteBuffer is called
+          cl_int err;
+          auto id = mem_ids[i];
+
+          if(is_write) {
+            OCL_CHECK(err, err = queues[cmdq_id].enqueueWriteBuffer(buffers[id], (cl_bool)flags, offset, size, ptr, NULL, NULL));
+
+            /* if write, set a dirty flag */
+            buffer_onfpga_flags[id] = true;
+          }
+          else {
+            OCL_CHECK(err, err = queues[cmdq_id].enqueueReadBuffer(buffers[id], (cl_bool)flags, offset, size, ptr, NULL, NULL));
+          }
+
+        }
+
+        sync_flag = false;
+        updated_flag = true;
+      }
+
 
       /**
        * wait for the completion of enqueued tasks 
