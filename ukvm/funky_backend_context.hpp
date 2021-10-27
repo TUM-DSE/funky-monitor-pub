@@ -132,8 +132,17 @@ namespace funky_backend {
       {
         cl_int err;
 
+        /* 
+         * When clEnqueueMapBuffer() is called by the guest, Funky OpenCL reserves memory region 
+         * for the buffer on the guest and nothing is done on FPGA side. 
+         * This case, the specified memory object might be initialized without CL_MEM_USE_HOST_PTR. 
+         * The backend adds CL_MEM_USE_HOST_PTR here for the particular case. 
+         */
+        if(host_ptr != nullptr)
+          mem_flags = mem_flags | CL_MEM_USE_HOST_PTR;
+
         OCL_CHECK(err,  buffers.emplace(mem_id, cl::Buffer(context, (cl_mem_flags) mem_flags, size, host_ptr, &err)));
-       // std::cout << "Succeeded to create buffer " << mem_id << std::endl;
+        // std::cout << "Succeeded to create buffer " << mem_id << std::endl;
         
         buffer_onfpga_flags.emplace(mem_id, false);
         buffer_gpas.emplace(mem_id, (ukvm_gpa_t) gpa);
