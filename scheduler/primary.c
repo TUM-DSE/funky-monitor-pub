@@ -1015,8 +1015,15 @@ int main()
 				free(task_tmp);
 				break;
 			case migration:
-				handle_migration_cmd(new_msg->migr_info,
-						     node_head, htsk_head);
+				if (htsk_last != NULL) {
+					htsk_last->next = ltsk_head;
+					handle_migration_cmd(new_msg->migr_info,
+							     node_head, htsk_head);
+					htsk_last->next = NULL;
+				} else {
+					handle_migration_cmd(new_msg->migr_info,
+							     node_head, ltsk_head);
+				}
 				close(events[i].data.fd);
 				break;
 			default:

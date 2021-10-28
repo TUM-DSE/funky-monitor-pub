@@ -23,6 +23,7 @@
 #define UKVM_SOC	"/tmp/ukvm_socket"
 #define GUEST_BIN_PATH	"/tmp/binary.ukvm"
 #define PORT_NODES	1742
+#define LOCALHOST	(((127&0xff) << 24) | ((0&0xff) << 16) | ((0&0xff) << 8) | 1)
 
 static struct in_addr to_node;
 
@@ -30,6 +31,8 @@ struct ukvm_ps {
 	pid_t pid;
 	char socket[30];
 	char binary[30];
+	char net[30];
+	char mig_file[30];
 };
 
 /*
@@ -140,14 +143,14 @@ static void transmit_mig_file()
 
 	memcpy(&addr.sin_addr, &to_node, sizeof(struct in_addr));
 	addr.sin_family = AF_INET;
-	addr.sin_port = htons(PORT_NODES+1);
+	addr.sin_port = htons(PORT_NODES);
 	sockfd = setup_socket(0, (struct sockaddr *) &addr, 0);
 	if (sockfd == -1) {
 		err_print("socket error %d\n", errno);
 		return;
 	}
 
-	rc = send_file(sockfd, GUEST_BIN_PATH, migrate);
+	rc = send_file(sockfd, "/tmp/binary_0.ukvm", migrate);
 	if (rc < 0)
 		return;
 
@@ -232,8 +235,8 @@ static int send_ukvm_cmd(const char *cmd, const char *soc_pth)
 		return -1;
 	}
 
-	rc = write(sockfd, cmd, sizeof(cmd));
-	if (rc < sizeof(cmd)) {
+	rc = write(sockfd, cmd, strlen(cmd));
+	if (rc < strlen(cmd)) {
 		if (rc < 0)
 			perror("write to ukvm socket");
 		else
@@ -329,6 +332,19 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 		if (send_ukvm_cmd("savevm /tmp/file.mig", "/tmp/ukvm0.sock") < 0)
 			goto ret_1;
 		to_node = node_com.rcv_ip;
+		printf("localhost is %d and to node is %d\n", LOCALHOST, ntohl(to_node.s_addr));
+		if (ntohl(to_node.s_addr) == LOCALHOST) {
+			struct sockaddr_in saddr;
+			socklen_t slen;
+
+			slen = sizeof(struct sockaddr_in);
+			memset(&saddr, 0, slen);
+			if (getsockname(socket, (struct sockaddr *) &saddr, &slen) < 0) {
+				perror("Get ip from socket\n");
+				goto ret_1;
+			}
+			to_node = saddr.sin_addr;
+		}
 		*ret = 3;
 	}
 	return ps_ukvm;
@@ -387,38 +403,55 @@ static int handle_sigchld(int sigfd)
  * Handle a connection with another node in order to
  * receive the migration files
  */
-static int msg_from_anode(int server_soc)
+static struct ukvm_ps *rcv_start_migrated_guest(int server_soc)
 {
 	int rc;
 	int mig_soc;
+	struct ukvm_ps *ps_ukvm = NULL;
 
 	mig_soc = accept(server_soc, NULL, NULL);
 	if (mig_soc == -1) {
 		perror("frontend socket accept");
-		return -1;
+		goto err_out;
 	}
 
+	ps_ukvm = malloc(sizeof(struct ukvm_ps));
+	if (ps_ukvm == NULL) {
+		err_print("Out of memory\n");
+		goto err_out;
+	}
+	sprintf(ps_ukvm->binary, "/tmp/rcvd_file.ukvm");
+	sprintf(ps_ukvm->mig_file, "--load=/tmp/file.mig");
+	sprintf(ps_ukvm->socket, "--mon=/tmp/ukvm1.sock");
+	sprintf(ps_ukvm->net, "--net=tap0");
 	/*
 	 * The first file is the binary
 	 * The second file is the migration file
 	 */
-	rc = receive_mig_files(mig_soc, "/tmp/rcvd_file.ukvm");
+	rc = receive_mig_files(mig_soc, ps_ukvm->binary);
 	if (rc < 0)
-		return -1;
+		goto err_out;
 
-	rc = receive_mig_files(mig_soc, "/tmp/rcvd_file.mig");
+	rc = receive_mig_files(mig_soc, ps_ukvm->mig_file + 7);
 	if (rc < 0)
-		return -1;
+		goto err_out;
 
 	/*
 	 * Start the migrated guest.
 	 */
-	if(start_guest("/tmp/file.mig", "/tmp/binary.ukvm", "--net=tap0",
-				"--mon="UKVM_SOC) < 0)
-		return -1;
-	printf("Started ukvm with migrated guest\n");
+	ps_ukvm->pid = start_guest(ps_ukvm->mig_file, ps_ukvm->binary, ps_ukvm->net,
+				ps_ukvm->socket);
+	if (ps_ukvm->pid < 0)
+		goto err_out;
+	printf("Started ukvm guest with pid %d\n", ps_ukvm->pid);
 
-	return 0;
+	close(mig_soc);
+	return ps_ukvm;
+err_out:
+	free(ps_ukvm);
+	ps_ukvm = NULL;
+	close(mig_soc);
+	return ps_ukvm;
 }
 
 /*
@@ -572,8 +605,8 @@ int main(int argc, char *argv[])
 				if (send_deploy_res(sched_sock, rc) < 0)
 					goto out_socs;
 			} else if (events[i].data.fd == server_soc) {
-				rc = msg_from_anode(server_soc);
-				if (rc < 0)
+				instance = rcv_start_migrated_guest(server_soc);
+				if (instance == NULL)
 					goto out_sfd;
 			}
 		}
