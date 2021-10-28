@@ -164,7 +164,8 @@ static void transmit_mig_file()
  * a migrated guest.
  */
 static int start_guest(const char *mig_arg, const char *guest_bin,
-			const char *net_arg, const char *mon_arg)
+			const char *net_arg, const char *mon_arg,
+			const char *args)
 {
 	int pid;
 
@@ -177,6 +178,7 @@ static int start_guest(const char *mig_arg, const char *guest_bin,
 		char *ukvm_bin = NULL;
 		char out_file[24];
 		char disk_arg[32] = "--disk=";
+		char mem_arg[32] = "--mem=1024";
 
 		strcat(disk_arg, guest_bin);
 		ukvm_bin = getenv("UKVM_BIN");
@@ -205,11 +207,11 @@ static int start_guest(const char *mig_arg, const char *guest_bin,
 			exit(EXIT_FAILURE);
 		}
 		if (mig_arg)
-			execl(ukvm_bin, ukvm_bin, net_arg, disk_arg, mig_arg, mon_arg,
-				guest_bin, (char *)NULL);
+			execl(ukvm_bin, ukvm_bin, mem_arg, net_arg, disk_arg,
+				mig_arg, mon_arg, guest_bin, (char *)NULL);
 		else
-			execl(ukvm_bin, ukvm_bin, net_arg, disk_arg, mon_arg,
-				guest_bin, (char *)NULL);
+			execl(ukvm_bin, ukvm_bin, mem_arg, net_arg, disk_arg,
+				mon_arg, guest_bin, args, (char *)NULL);
 	} else if (pid == -1) {
 		perror("fork");
 		return -1;
@@ -248,6 +250,47 @@ static int send_ukvm_cmd(const char *cmd, const char *soc_pth)
 	return 0;
 }
 
+static char *rcv_args(int socket, int *rc)
+{
+	struct com_nod nargs_com;
+	char *args = NULL;
+
+	*rc = 0;
+	*rc = read(socket, &nargs_com, sizeof(struct com_nod));
+	if (*rc < sizeof(struct com_nod)) {
+		err_print("Lost connection with primary scheduler\n");
+		if (*rc < 0)
+			perror("Read message from primary\n");
+		*rc = -1;
+		return NULL;
+	}
+	if (nargs_com.type != arguments) {
+		err_print("Received invalid message\n");
+		*rc = -1;
+		return NULL;
+	}
+	if (nargs_com.size == 0) {
+		*rc = 0;
+		return NULL;
+	}
+	args = malloc(nargs_com.size);
+	if (args == NULL) {
+		err_print("Out of memory\n");
+		return NULL;
+	}
+	*rc = read(socket, args, nargs_com.size);
+	if (*rc < nargs_com.size) {
+		err_print("Lost connection with primary scheduler\n");
+		if (*rc < 0)
+			perror("Read message from primary\n");
+		free(args);
+		*rc = -1;
+		return NULL;
+	}
+
+	return args;
+}
+
 /*
  * Handle new message from primary scheduler
  */
@@ -257,6 +300,7 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 	uint8_t *buf;
 	struct com_nod node_com;
 	struct ukvm_ps *ps_ukvm = NULL;
+
 	*ret = 3;
 
 	ps_ukvm = malloc(sizeof(struct ukvm_ps));
@@ -266,16 +310,15 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 	}
 
 	rc = read(socket, &node_com, sizeof(struct com_nod));
-	if (rc <= 0) {
+	if (rc < sizeof(struct com_nod)) {
 		err_print("Lost connection with primary scheduler\n");
 		if (rc < 0)
 			perror("Read message from primary\n");
 		goto ret_1;
-	} else if (rc < sizeof(struct com_nod)) {
-		err_print("Short read on primary's message\n");
-		goto ret_1;
 	}
 	if (node_com.type == deploy) {
+		char *args = NULL;
+
 		memset(ps_ukvm->socket, 0, 30*sizeof(char));
 		memset(ps_ukvm->binary, 0, 30*sizeof(char));
 		/*
@@ -291,14 +334,19 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 		free(buf);
 		if (rc < 0)
 			goto ret_1;
+		args = rcv_args(socket, &rc);
+		if (rc < 0)
+			goto ret_1;
 		// start new task
 		ps_ukvm->pid = start_guest(NULL, ps_ukvm->binary, "--net=tap0",
-					   ps_ukvm->socket);
+					   ps_ukvm->socket, args);
 		if (ps_ukvm->pid < 0)
 			goto ret_1;
 		printf("Started ukvm guest with pid %d\n", ps_ukvm->pid);
 		*ret = 0;
 	} else if (node_com.type == evict) {
+		char *args = NULL;
+
 		memset(ps_ukvm->socket, 0, 30*sizeof(char));
 		memset(ps_ukvm->binary, 0, 30*sizeof(char));
 		/*
@@ -314,12 +362,15 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 		free(buf);
 		if (rc < 0)
 			goto ret_1;
+		args = rcv_args(socket, &rc);
+		if (rc < 0)
+			goto ret_1;
 		// Stop current task
 		if (send_ukvm_cmd("stop", "/tmp/ukvm0.sock") < 0)
 			goto ret_1;
 		// start new task
 		ps_ukvm->pid = start_guest(NULL, ps_ukvm->binary, "--net=tap1",
-					   ps_ukvm->socket);
+					   ps_ukvm->socket, args);
 		if (ps_ukvm->pid < 0)
 			goto ret_1;
 		printf("Started ukvm guest with pid %d\n", ps_ukvm->pid);
@@ -332,14 +383,13 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 		if (send_ukvm_cmd("savevm /tmp/file.mig", "/tmp/ukvm0.sock") < 0)
 			goto ret_1;
 		to_node = node_com.rcv_ip;
-		printf("localhost is %d and to node is %d\n", LOCALHOST, ntohl(to_node.s_addr));
 		if (ntohl(to_node.s_addr) == LOCALHOST) {
 			struct sockaddr_in saddr;
 			socklen_t slen;
 
 			slen = sizeof(struct sockaddr_in);
 			memset(&saddr, 0, slen);
-			if (getsockname(socket, (struct sockaddr *) &saddr, &slen) < 0) {
+			if (getpeername(socket, (struct sockaddr *) &saddr, &slen) < 0) {
 				perror("Get ip from socket\n");
 				goto ret_1;
 			}
@@ -440,7 +490,7 @@ static struct ukvm_ps *rcv_start_migrated_guest(int server_soc)
 	 * Start the migrated guest.
 	 */
 	ps_ukvm->pid = start_guest(ps_ukvm->mig_file, ps_ukvm->binary, ps_ukvm->net,
-				ps_ukvm->socket);
+				ps_ukvm->socket, NULL);
 	if (ps_ukvm->pid < 0)
 		goto err_out;
 	printf("Started ukvm guest with pid %d\n", ps_ukvm->pid);

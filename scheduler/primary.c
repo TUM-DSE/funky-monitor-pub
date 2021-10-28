@@ -14,8 +14,9 @@
 
 #include "common.h"
 
-#define BIN_PATH_LEN	254
-#define FRONT_CMD_LEN	300
+#define BIN_PATH_LEN	256
+#define ARGS_LEN	128
+#define FRONT_CMD_LEN	400
 
 /*
  * The state of a task. For the time being
@@ -52,6 +53,7 @@ enum msg_type {
 struct task {
 	uint32_t id;
 	char *bin_path;
+	char *bin_args;
 	uint8_t priority;
 	enum task_state state;
 	struct node *node;	// the node where the task has been deployed
@@ -146,7 +148,7 @@ static char *strdup(const char *s)
 /*
  * Create and initialize an entry for a new task
  */
-static struct task *create_new_task(char *path, uint8_t priority)
+static struct task *create_new_task(char *path, uint8_t priority, char *args)
 {
 	struct task *new_task;
 
@@ -161,11 +163,22 @@ static struct task *create_new_task(char *path, uint8_t priority)
 		free(new_task);
 		return NULL;
 	}
+
 	new_task->priority = priority;
 	new_task->node = NULL;;
 	new_task->state = ready;
 	new_task->next = NULL;
 	new_task->prev = NULL;
+	if (args[0]  == 0) {
+		new_task->bin_args = NULL;
+	} else {
+		new_task->bin_args = strdup(args);
+		if (!new_task->bin_args) {
+			free(new_task->bin_path);
+			free(new_task);
+			return NULL;
+		}
+	}
 
 	return new_task;
 }
@@ -209,14 +222,16 @@ static void *get_cmd_front(void *arg)
 	if (front_cmd[0] == 'N') {
 		uint8_t prior = 2;
 		char path_bin[BIN_PATH_LEN] = {0};
+		char args[ARGS_LEN] = {0};
 
-		rc = sscanf(front_cmd, "New: %s priority: %hhu", path_bin, &prior);
+		rc = sscanf(front_cmd, "New: %s priority: %hhu args: %[^\t\n]",
+				path_bin, &prior, args);
 		if (rc < 2) {
 			err_print("Invalid command\n");
 			goto exit_front;
 		}
 
-		tsk_to_add = create_new_task(path_bin, prior);
+		tsk_to_add = create_new_task(path_bin, prior, args);
 		if (!tsk_to_add) {
 			err_print("Could not create new task\n");
 			goto exit_front;
@@ -396,6 +411,38 @@ static ssize_t send_migration_command(struct node *nd, int socket)
 	return 0;
 }
 
+static ssize_t send_bin_args(int soc, const char *args)
+{
+	struct com_nod node_com = {0};
+	ssize_t rc;
+
+	node_com.type = arguments;
+	if (args != NULL)
+		node_com.size = strlen(args);
+	else
+		node_com.size = 0;
+	rc = write(soc, &node_com, sizeof(struct com_nod));
+	if (rc < sizeof(struct com_nod)) {
+		if (rc < 0)
+			perror("Sending args info");
+		else
+			err_print("Short send of args info\n");
+		return -1;
+	}
+	if (args != NULL) {
+		rc = write(soc, args, node_com.size);
+		if (rc < node_com.size) {
+			if (rc < 0)
+				perror("Sending args");
+			else
+				err_print("Short send of args\n");
+			return -1;
+		}
+	}
+
+	return rc;
+}
+
 /*
  * Handle events from worker's epoll.
  * There can be just 2 events:
@@ -469,14 +516,19 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd,
 			}
 
 			msg_node = (struct msg_to_worker *) efval;
-			if (msg_node->type == deploy)
-				rc = send_file(con, msg_node->tsk->bin_path, deploy);
+			if (msg_node->type == deploy || msg_node->type == evict)
+				rc = send_file(con, msg_node->tsk->bin_path,
+						msg_node->type);
 			else if (msg_node->type == migrate)
 				rc = send_migration_command(msg_node->node, con);
 			else if (msg_node->type == resume)
 				rc = send_resume_command(con);
-			else if (msg_node->type == evict)
-				rc = send_file(con, msg_node->tsk->bin_path, evict);
+			if (rc < 0) {
+				free(msg_node);
+				return -1;
+			}
+			if (msg_node->type == deploy || msg_node->type == evict)
+				rc = send_bin_args(con, msg_node->tsk->bin_args);
 			free(msg_node);
 			if (rc < 0)
 				return -1;
@@ -509,7 +561,7 @@ static struct node *create_new_node(struct thr_data *td, int sfd)
 	 */
 	slen = sizeof(struct sockaddr_in);
 	memset(&saddr_node, 0, slen);
-	if (getsockname(sfd, (struct sockaddr *) &saddr_node, &slen) < 0) {
+	if (getpeername(sfd, (struct sockaddr *) &saddr_node, &slen) < 0) {
 		perror("Get ip from socket\n");
 		free(nd);
 		return NULL;
@@ -843,7 +895,7 @@ static void scheduler_algorithm(struct node *nhead, struct task *thead,
 	printf("----------------- Tasks ----------------\n");
 	tsk_tmp = thead;
 	while(tsk_tmp) {
-		printf("Task id %d with state %d, priority %hhu and bin at %s\n", tsk_tmp->id,tsk_tmp->state, tsk_tmp->priority, tsk_tmp->bin_path);
+		printf("Task id %d with state %d, priority %hhu and bin at %s and args %s\n", tsk_tmp->id,tsk_tmp->state, tsk_tmp->priority, tsk_tmp->bin_path, tsk_tmp->bin_args ? tsk_tmp->bin_args : "");
 		if (tsk_tmp->state == stopped && tsk_tmp->node->state == available) {
 			tsk_avail = tsk_tmp;
 			node_avail = tsk_tmp->node;
@@ -985,7 +1037,7 @@ int main()
 				remove_node(&node_head, &node_last, new_msg->nres.node);
 				printf("went down\n");
 				break;
-			case node_ret:
+			case node_ret: {
 				struct node *node_tmp;
 				struct task *task_tmp;
 
@@ -1012,8 +1064,10 @@ int main()
 							task_tmp);
 				}
 				free(task_tmp->bin_path);
+				free(task_tmp->bin_args);
 				free(task_tmp);
 				break;
+			}
 			case migration:
 				if (htsk_last != NULL) {
 					htsk_last->next = ltsk_head;
@@ -1045,7 +1099,6 @@ int main()
 		}
 		if (!tsk_avail || !node_avail)
 			continue;
-		printf("task: %d node %d\n", tsk_avail->id, node_avail->id);
 		/*
 		 * Deploy
 		 */

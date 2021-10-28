@@ -71,7 +71,7 @@ err_set:
 /*
  * Send a file over a socket
  */
-int send_file(int socket, const char *filename, enum mnode_type msg_type)
+ssize_t send_file(int socket, const char *filename, enum mnode_type msg_type)
 {
 	int rc = 0, fd;
 	struct stat st;
@@ -115,7 +115,7 @@ int send_file(int socket, const char *filename, enum mnode_type msg_type)
 		}
 		count += n;
 	}
-	return rc;
+	return count;
 
 err_send:
 	close(fd);

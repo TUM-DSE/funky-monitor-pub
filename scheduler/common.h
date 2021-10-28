@@ -17,7 +17,8 @@ enum mnode_type {
 	mig_cmd,
 	evict,
 	resume,
-	migrate
+	migrate,
+	arguments
 };
 
 /*
@@ -34,6 +35,6 @@ struct com_nod {
 };
 
 int setup_socket(int epollfd, struct sockaddr *saddr, uint8_t tobind);
-int send_file(int socket, const char *filename, enum mnode_type msg_type);
+ssize_t send_file(int socket, const char *filename, enum mnode_type msg_type);
 
 #endif /* SCHED_COMMON_H */
