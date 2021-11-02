@@ -68,6 +68,8 @@ namespace funky_backend {
       num_events = einfo->wait_event_num;
       event_list_ids = (num_events > 0)? (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) einfo->wait_event_ids, sizeof(int) * num_events): nullptr;
       event_id = einfo->id; 
+
+      DEBUG_STREAM("received event_info. id: " << einfo->id << ", num_events: " << num_events);
     }
 
     /* MIGRATE or READ/WRITE */
@@ -108,11 +110,19 @@ namespace funky_backend {
     for (auto i=0; i<arg_num; i++)
     {
       auto arg = &(args[i]);
+      DEBUG_STREAM("set arg[" << i << "], mem_id: " << arg->mem_id );
 
       /* if the argument is variable (mem_id == -1), do the address translation */
       void* src=nullptr;
       if(arg->mem_id < 0)
+      {
+        DEBUG_STREAM("scalar arg[" << i << "] addr: " << arg->src << ", size: " << arg->size );
         src = UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) arg->src, arg->size);
+      }
+      else 
+      {
+        DEBUG_STREAM("memobj arg[" << i << "], size: " << arg->size );
+      }
 
       context->set_arg(kernel_name, arg, src);
     }
@@ -128,12 +138,14 @@ namespace funky_backend {
       num_events = einfo->wait_event_num;
       event_list_ids = (num_events > 0)? (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) einfo->wait_event_ids, sizeof(int) * num_events): nullptr;
       event_id = einfo->id; 
+
+      DEBUG_STREAM("received event_info. id: " << einfo->id << ", num_events: " << num_events << ", list_addr: " << einfo->wait_event_ids);
     }
 
     /* execute the kernel */
     context->enqueue_kernel(req.get_cmdq_id(), kernel_name, num_events, event_list_ids, event_id);
 
-    DEBUG_STREAM("EXEC request is finished. ");
+    DEBUG_STREAM("EXEC request is done. ");
     return 0;
   }
 
@@ -151,6 +163,7 @@ namespace funky_backend {
       {
         DEBUG_STREAM("calling clFinish()...");
         context->sync_fpga(req.get_cmdq_id());
+        DEBUG_STREAM("clFinish() is done.");
         break;
       }
       case funky_msg::PROFILE:

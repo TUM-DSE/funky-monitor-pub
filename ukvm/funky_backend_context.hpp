@@ -87,6 +87,7 @@ namespace funky_backend {
         OCL_CHECK(err, context = cl::Context(device, NULL, NULL, NULL, &err));
         // OCL_CHECK(err, queue = cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err));
         OCL_CHECK(err,  queues.emplace(0, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
+        // OCL_CHECK(err,  queues.emplace(0, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE | CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, &err)));
       }
 
       ~XoclContext()
@@ -177,6 +178,8 @@ namespace funky_backend {
         // std::vector<cl::Event> event_list;
         for(unsigned int i=0; i<num_events; i++)
         {
+          DEBUG_STREAM("INFO: searching for the event (id: " << event_list_ids[i] << ")...");
+
           auto event_in_map = events.find(event_list_ids[i]);
           if(event_in_map == events.end()) {
             std::cout << "UKVM (ERROR): event " << event_list_ids[i] << " is not found. " << std::endl;
@@ -223,9 +226,12 @@ namespace funky_backend {
             return;
           }
 
+          DEBUG_STREAM("set scalar (addr: " << src << ", size: " << arg->size << ") to arg[" << arg->index << "]" );
+          DEBUG_STREAM("scalar value: " << *(unsigned int*)src);
           OCL_CHECK(err, err = kernels[id].setArg(arg->index, arg->size, (const void*)src));
         }
         else {
+          DEBUG_STREAM("set memobj[" << arg->mem_id << "] to arg[" << arg->index << "]" );
           /* OpenCL memory objects */
           OCL_CHECK(err, err = kernels[id].setArg(arg->index, buffers[arg->mem_id]));
 
@@ -249,10 +255,6 @@ namespace funky_backend {
           DEBUG_STREAM("UKVM: new cmd queue (id: " << cmdq_id << ") is created. ");
         }
 
-        /* TODO: support for enqueueNDRangeKernel() */
-        // For HLS kernels global and local size is always (1,1,1). So, it is recommended
-        // to always use enqueueTask() for invoking HLS kernel
-
         /* create a new event */
         DEBUG_STREAM("event id: " << event_id);
         auto event_ptr = (event_id  >= 0)? create_event(event_id): nullptr;
@@ -262,6 +264,9 @@ namespace funky_backend {
         update_event_list(wait_list, num_events, event_list_ids);
         auto list_ptr  = (wait_list.size() > 0)? &wait_list: nullptr;
 
+        /* TODO: support for enqueueNDRangeKernel() */
+        // For HLS kernels global and local size is always (1,1,1). So, it is recommended
+        // to always use enqueueTask() for invoking HLS kernel
         OCL_CHECK(err, err = queues[cmdq_id].enqueueTask(kernels[id], list_ptr, event_ptr));
 
         sync_flag = false;
@@ -313,7 +318,6 @@ namespace funky_backend {
           DEBUG_STREAM("Writing data to GMEM... ");
         else
           DEBUG_STREAM("Reading data from GMEM... ");
-
 
         sync_flag = false;
         updated_flag = true;
@@ -420,6 +424,8 @@ namespace funky_backend {
        */
       void sync_fpga(int cmdq_id)
       {
+        DEBUG_STREAM("sync cmdq (id: " << cmdq_id << ")");
+
         auto queue_in_map = queues.find(cmdq_id);
         if(queue_in_map == queues.end()) {
           std::cout << "UKVM (ERROR): cmd queue " << cmdq_id << " is not found. " << std::endl;
