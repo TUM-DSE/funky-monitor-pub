@@ -21,6 +21,7 @@ namespace funky_msg {
   enum ReqType {MEMORY, TRANSFER, EXECUTE, SYNC};
   enum MemType {BUFFER, PIPE, IMAGE};
   enum TransType {MIGRATE, WRITE, READ};
+  enum SyncType {FINISH, PROFILE, WAITEVENTS};
 
   /**
    * mem_info is used to initialize memory objects on FPGA with input/output data.
@@ -87,6 +88,25 @@ namespace funky_msg {
     }
   };
 
+  struct event_info {
+    int id; 
+    uint32_t wait_event_num;
+    int* wait_event_ids;
+    uint32_t param_name;
+    void* param; // size is fixed (64 bits, cl_ulong)
+
+    event_info(int event_id, uint32_t we_num, int* we_ids)
+      : id(event_id), wait_event_num(we_num), wait_event_ids(we_ids)
+    {}
+
+    event_info(int event_id, uint32_t we_num, int* we_ids, uint32_t pname, void* pvalue)
+      : event_info(event_id, we_num, we_ids)
+    {
+      param_name = pname;
+      param = pvalue;
+    }
+  };
+
   class request {
     private:
       ReqType req_type;
@@ -104,22 +124,24 @@ namespace funky_msg {
       uint32_t arg_num; 
       arg_info *args; 
 
-      /* for TRANSFER, EXECUTE, SYNQ request */
+      /* for TRANSFER, EXECUTE, SYNC request */
       uint32_t cmdq_id;
-      // int32_t event_id; // -1: no event, 0 or higher: id
 
       /* for SYNC request */
-      // uint32_t event_num;
-      // uint32_t* event_ids;
+      SyncType sync_type;
+      event_info *evinfo;
 
     public:
       // delegating constructor (and for SYNC request)
       request(ReqType type) 
         : req_type(type), mem_num(0), mems(NULL), 
-          kernel_name(NULL), name_size(0), arg_num(0), args(NULL)// , event_num(0)
+          kernel_name(NULL), name_size(0), arg_num(0), args(NULL), evinfo(NULL)
       {}
 
-      // TODO: merge these constructors into one  
+      /* 
+       * TODO: use overriding to prepare for different message classes 
+       * create base 'request' class derived by the others (memory_req, transfer_req, ...)
+       */
       /* for MEMORY request */
       request(ReqType type, uint32_t num, void** ptr)
         : request(type)
@@ -130,16 +152,17 @@ namespace funky_msg {
       }
 
       /* for TRANSFER request */
-      request(ReqType type, void* ptr, uint32_t cl_cmdq_id)
+      request(ReqType type, void* ptr, uint32_t cl_cmdq_id, event_info* event_info)
         : request(type)
       {
         // TODO: error if type != TRANSFER
         trans   = (transfer_info*) ptr;
         cmdq_id = cl_cmdq_id;
+        evinfo = event_info;
       }
 
       /* for EXEC request */
-      request(ReqType type, const char* name, size_t size, uint32_t num, void* ptr, uint32_t cl_cmdq_id)
+      request(ReqType type, const char* name, size_t size, uint32_t num, void* ptr, uint32_t cl_cmdq_id, event_info* event_info)
         : request(type)
       {
         // TODO: error if type != EXEC
@@ -148,22 +171,30 @@ namespace funky_msg {
         arg_num = num;
         args    = (arg_info*) ptr;
         cmdq_id = cl_cmdq_id;
+        evinfo = event_info;
       }
 
       /* for SYNC request */
-      request(ReqType type, uint32_t cl_cmdq_id)
+      request(ReqType type, SyncType s_type, uint32_t cl_cmdq_id, event_info* event_info)
         : request(type)
       {
         // TODO: error if type != SYNC
         cmdq_id = cl_cmdq_id;
+        evinfo = event_info;
+        sync_type = s_type;
       }
 
       ReqType get_request_type(void) {
         return req_type;
       }
 
+      SyncType get_sync_type(void) {
+        return sync_type;
+      }
+
       int get_cmdq_id(void) {
-        return (cmdq_id >= 0)? (int) cmdq_id: -1;
+        // return (cmdq_id >= 0)? (int) cmdq_id: -1;
+        return cmdq_id;
       }
 
       const char* get_kernel_name(size_t& size) {
@@ -191,6 +222,12 @@ namespace funky_msg {
         num = arg_num;
         return (void *)args;
       }
+
+      void* get_eventinfo(void) {
+        // return (cmdq_id >= 0)? (int) cmdq_id: -1;
+        return (void *)evinfo;
+      }
+
   };
 
   class response {

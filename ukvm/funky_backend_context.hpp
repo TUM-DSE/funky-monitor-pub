@@ -55,6 +55,7 @@ namespace funky_backend {
       std::map<int, ukvm_gpa_t> buffer_gpas;
 
       // TODO: cl::Event
+      std::map<int, cl::Event> events;
 
       // for migration
       std::vector<uint8_t> mig_save_data;
@@ -104,6 +105,8 @@ namespace funky_backend {
        */
       bool send_response(funky_msg::ReqType type)
       {
+        DEBUG_STREAM("send a response to the guest. type: " << type);
+
         funky_msg::response response(type);
         return response_q.push(response);
       }
@@ -155,6 +158,38 @@ namespace funky_backend {
         return buffers.size();
       }
 
+      /* create a new event */
+      cl::Event* create_event(unsigned int event_id)
+      {
+        cl::Event new_event;
+        auto result = events.emplace(event_id, new_event);
+        if(result.second == false)
+          DEBUG_STREAM("INFO: event (id: " << event_id << ") already exists.");
+        else
+          DEBUG_STREAM("INFO: event (id: " << event_id << ") is newly created.");
+
+        return &events[event_id];
+      }
+
+      /* create an event wait list */
+      void update_event_list(std::vector<cl::Event>& event_list, unsigned int num_events, int* event_list_ids)
+      {
+        // std::vector<cl::Event> event_list;
+        for(unsigned int i=0; i<num_events; i++)
+        {
+          auto event_in_map = events.find(event_list_ids[i]);
+          if(event_in_map == events.end()) {
+            std::cout << "UKVM (ERROR): event " << event_list_ids[i] << " is not found. " << std::endl;
+            exit(1);
+          }
+
+          event_list.push_back((cl::Event) event_in_map->second());
+        }
+
+        // return event_list;
+        return;
+      }
+
       /* create a new kernel */
       // TODO: return the kernel instance itself?
       // set_arg() and create_kernel() will be also changed to use the instance as an argument
@@ -202,7 +237,7 @@ namespace funky_backend {
       /**
        * launch the kernel 
        */
-      void enqueue_kernel(int cmdq_id, const char* kernel_name)
+      void enqueue_kernel(int cmdq_id, const char* kernel_name, unsigned int num_events, int* event_list_ids, int event_id)
       {
         cl_int err;
         auto id = kernel_name;
@@ -210,12 +245,6 @@ namespace funky_backend {
         /* create a cmd queue if not exists */
         auto queue_in_map = queues.find(cmdq_id);
         if(queue_in_map == queues.end()) {
-          // auto devices = xcl::get_xil_devices();
-          // if(devices.size() == 0) {
-          //   exit(EXIT_FAILURE);
-          // }
-          // auto device = devices[0];
-
           OCL_CHECK(err,  queues.emplace(cmdq_id, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
           DEBUG_STREAM("UKVM: new cmd queue (id: " << cmdq_id << ") is created. ");
         }
@@ -223,7 +252,17 @@ namespace funky_backend {
         /* TODO: support for enqueueNDRangeKernel() */
         // For HLS kernels global and local size is always (1,1,1). So, it is recommended
         // to always use enqueueTask() for invoking HLS kernel
-        OCL_CHECK(err, err = queues[cmdq_id].enqueueTask(kernels[id]));
+
+        /* create a new event */
+        DEBUG_STREAM("event id: " << event_id);
+        auto event_ptr = (event_id  >= 0)? create_event(event_id): nullptr;
+
+        /* wait for events in the waiting list */
+        std::vector<cl::Event> wait_list;
+        update_event_list(wait_list, num_events, event_list_ids);
+        auto list_ptr  = (wait_list.size() > 0)? &wait_list: nullptr;
+
+        OCL_CHECK(err, err = queues[cmdq_id].enqueueTask(kernels[id], list_ptr, event_ptr));
 
         sync_flag = false;
         updated_flag = true;
@@ -236,28 +275,45 @@ namespace funky_backend {
        * @param (flags)   : 0 means from host, CL_MIGRATE_MEM_OBJECT_HOST means to host 
        *                     cl_mem_migration_flags, a bitfield based on unsigned int64
        */
-      void enqueue_transfer(int cmdq_id, int mem_ids[], size_t id_num, uint64_t flags)
+      void enqueue_transfer(int cmdq_id, int mem_ids[], size_t id_num, uint64_t flags, unsigned int num_events, int* event_list_ids, int event_id)
       {
         /* create a cmd queue if not exists */
         auto queue_in_map = queues.find(cmdq_id);
         if(queue_in_map == queues.end()) {
           cl_int err;
           OCL_CHECK(err,  queues.emplace(cmdq_id, cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err)));
-          DEBUG_STREAM("UKVM: new cmd queue (id: " << cmdq_id << ") is created. ");
+          DEBUG_STREAM("new cmd queue (id: " << cmdq_id << ") is created. ");
         }
 
+        /* create a list of memory objects */
+        std::vector<cl::Memory> trans_buffers;
         for(size_t i=0; i<id_num; i++)
         {
-          // TODO: consider when enqueueReadBuffer or enqueueWriteBuffer is called
-          cl_int err;
           auto id = mem_ids[i];
-          // OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
-          OCL_CHECK(err, err = queues[cmdq_id].enqueueMigrateMemObjects({buffers[id]}, (cl_mem_migration_flags)flags));
+          trans_buffers.emplace_back(buffers[id]);
+          DEBUG_STREAM("Buffer (id: " << id << ") is added to the transfer list. ");
 
           /* 0 means data transfers from Host to FPGA */
           if( flags == 0 )
             buffer_onfpga_flags[id] = true;
         }
+
+        /* create a new event */
+        auto event_ptr = (event_id  >= 0)? create_event(event_id): nullptr;
+
+        /* wait for events in the waiting list */
+        std::vector<cl::Event> wait_list;
+        update_event_list(wait_list, num_events, event_list_ids);
+        auto list_ptr  = (wait_list.size() > 0)? &wait_list: nullptr;
+
+        cl_int err;
+        OCL_CHECK(err, err = queues[cmdq_id].enqueueMigrateMemObjects(trans_buffers, (cl_mem_migration_flags)flags, list_ptr, event_ptr));
+
+        if(flags == 0)
+          DEBUG_STREAM("Writing data to GMEM... ");
+        else
+          DEBUG_STREAM("Reading data from GMEM... ");
+
 
         sync_flag = false;
         updated_flag = true;
@@ -273,7 +329,7 @@ namespace funky_backend {
        * @param (ptr)     : a pointer to host memory where data is read from or written to.
        *
        */
-      void enqueue_transfer(int cmdq_id, int mem_ids[], size_t id_num, uint64_t flags, size_t offset, size_t size, void *ptr, bool is_write)
+      void enqueue_transfer(int cmdq_id, int mem_ids[], size_t id_num, uint64_t flags, size_t offset, size_t size, void *ptr, bool is_write, unsigned int num_events, int* event_list_ids, int event_id)
       {
         /* create a cmd queue if not exists */
         auto queue_in_map = queues.find(cmdq_id);
@@ -283,6 +339,14 @@ namespace funky_backend {
           DEBUG_STREAM("UKVM: new cmd queue (id: " << cmdq_id << ") is created. ");
         }
 
+        /* create a new event */
+        auto event_ptr = (event_id  >= 0)? create_event(event_id): nullptr;
+
+        /* wait for events in the waiting list */
+        std::vector<cl::Event> wait_list;
+        update_event_list(wait_list, num_events, event_list_ids);
+        auto list_ptr  = (wait_list.size() > 0)? &wait_list: nullptr;
+
         for(size_t i=0; i<id_num; i++)
         {
           // TODO: consider when enqueueReadBuffer or enqueueWriteBuffer is called
@@ -290,19 +354,64 @@ namespace funky_backend {
           auto id = mem_ids[i];
 
           if(is_write) {
-            OCL_CHECK(err, err = queues[cmdq_id].enqueueWriteBuffer(buffers[id], (cl_bool)flags, offset, size, ptr, NULL, NULL));
+            OCL_CHECK(err, err = queues[cmdq_id].enqueueWriteBuffer(buffers[id], (cl_bool)flags, offset, size, ptr, list_ptr, event_ptr));
 
             /* if write, set a dirty flag */
             buffer_onfpga_flags[id] = true;
           }
           else {
-            OCL_CHECK(err, err = queues[cmdq_id].enqueueReadBuffer(buffers[id], (cl_bool)flags, offset, size, ptr, NULL, NULL));
+            OCL_CHECK(err, err = queues[cmdq_id].enqueueReadBuffer(buffers[id], (cl_bool)flags, offset, size, ptr, list_ptr, event_ptr));
           }
 
         }
 
         sync_flag = false;
         updated_flag = true;
+      }
+
+      /**
+       * call clGetEventProfilingInfo()
+       */
+      void get_profiling_info(int event_id, cl_profiling_info param_name, void* param_value)
+      {
+        cl_int err;
+
+        auto event_in_map = events.find(event_id);
+        if(event_in_map == events.end()) {
+          std::cout << "UKVM (ERROR): event " << event_id << " is not found. " << std::endl;
+          exit(1);
+        }
+
+        DEBUG_STREAM("event[" << event_id << "] is found.");
+
+        // TODO: the following reference to eventobj gets failed. Why??
+        // auto event = (cl::Event) event_in_map->second();
+        // OCL_CHECK(err, err = event.getProfilingInfo<uint64_t>(param_name, (uint64_t*) param_value));
+        OCL_CHECK(err, err = events[event_id].getProfilingInfo<uint64_t>(param_name, (uint64_t*) param_value));
+      }
+
+      /**
+       * call clWaitForEvents()
+       */
+      void wait_for_events(unsigned int num_events, int* event_list_ids)
+      {
+        cl_int err;
+
+        if(num_events == 0 || event_list_ids == nullptr) {
+          std::cout << "Error: No events are in the list. at least one event must be specified. " << std::endl;
+          exit(1);
+        }
+
+        std::vector<cl::Event> wait_list;
+        update_event_list(wait_list, num_events, event_list_ids);
+
+        if(wait_list.size() == 0) {
+          std::cout << "Warning: no events to be waited. " << std::endl;
+          return;
+        }
+        OCL_CHECK(err, err = cl::Event::waitForEvents(wait_list));
+
+        sync_flag=true;
       }
 
 
@@ -316,9 +425,6 @@ namespace funky_backend {
           std::cout << "UKVM (ERROR): cmd queue " << cmdq_id << " is not found. " << std::endl;
           exit(1);
         }
-
-        // queues[cmdq_id].finish();
-        // queue_in_map->second.data()->finish();
         queue_in_map->second.finish();
 
         sync_flag=true;

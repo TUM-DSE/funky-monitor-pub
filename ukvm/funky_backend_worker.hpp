@@ -26,7 +26,7 @@ namespace funky_backend {
    */
   int handle_memory_request(struct ukvm_hv *hv, funky_backend::XoclContext* context, funky_msg::request& req)
   {
-    // std::cout << "UKVM: received a MEMORY request." << std::endl;
+    DEBUG_STREAM("received a MEMORY request.");
 
     /* read meminfo from the guest memory */
     int mem_num=0;
@@ -36,7 +36,7 @@ namespace funky_backend {
     for (auto i=context->get_created_buffer_num(); i<mem_num; i++)
     {
       auto m = (funky_msg::mem_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) mems[i], sizeof(funky_msg::mem_info));
-      // std::cout << "mems[" << i << "], id: " << m->id << ", addr: " << m->src << ", size: " << m->size << std::endl;
+      DEBUG_STREAM("mems[" << i << "], id: " << m->id << ", addr: " << std::hex << m->src << ", size: " << m->size << ", flags: " << m->flags);
 
       void* host_ptr = (m->src == nullptr)? nullptr: UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) m->src, m->size);
       context->create_buffer(m->id, m->flags, m->size, host_ptr, m->src);
@@ -50,22 +50,36 @@ namespace funky_backend {
    **/
   int handle_transfer_request(struct ukvm_hv *hv, funky_backend::XoclContext* context, funky_msg::request& req)
   {
-    // std::cout << "UKVM: received a TRANSFER request." << std::endl;
+    DEBUG_STREAM("received a TRANSFER request.");
 
     /* read transfer info from the guest memory */
     auto ptr     = req.get_transferinfo();
     auto trans   = (funky_msg::transfer_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::transfer_info*));
     auto mem_ids = (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) trans->ids, sizeof(int) * trans->num);
 
+    /* read event info */
+    unsigned int num_events = 0;
+    int* event_list_ids = nullptr;
+    int event_id = -1;
+    auto einfo_ptr = req.get_eventinfo();
+    if(einfo_ptr != nullptr)
+    {
+      auto einfo = (funky_msg::event_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) einfo_ptr, sizeof(funky_msg::event_info*));
+      num_events = einfo->wait_event_num;
+      event_list_ids = (num_events > 0)? (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) einfo->wait_event_ids, sizeof(int) * num_events): nullptr;
+      event_id = einfo->id; 
+    }
+
     /* MIGRATE or READ/WRITE */
     if(trans->trans == funky_msg::MIGRATE) {
-      context->enqueue_transfer(req.get_cmdq_id(), mem_ids, trans->num, trans->flags);
+      DEBUG_STREAM("transfer type: MIGRATE ");
+      context->enqueue_transfer(req.get_cmdq_id(), mem_ids, trans->num, trans->flags, num_events, event_list_ids, event_id);
     }
     else {
-      DEBUG_STREAM("received Read/Write request. ");
+      DEBUG_STREAM("transfer type: READ/WRITE ");
       bool is_write = (trans->trans == funky_msg::WRITE)? true: false;
       auto host_ptr = (void*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) trans->ptr, sizeof(uint8_t) * trans->size);
-      context->enqueue_transfer(req.get_cmdq_id(), mem_ids, trans->num, trans->flags, trans->offset, trans->size, host_ptr, is_write);
+      context->enqueue_transfer(req.get_cmdq_id(), mem_ids, trans->num, trans->flags, trans->offset, trans->size, host_ptr, is_write, num_events, event_list_ids, event_id);
     }
 
     return 0;
@@ -88,9 +102,9 @@ namespace funky_backend {
     size_t name_size=0;
     auto name_ptr = req.get_kernel_name(name_size);
     auto kernel_name = (const char*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) name_ptr, name_size);
-
     context->create_kernel(kernel_name);
 
+    /* set arguments of kernel */
     for (auto i=0; i<arg_num; i++)
     {
       auto arg = &(args[i]);
@@ -103,9 +117,23 @@ namespace funky_backend {
       context->set_arg(kernel_name, arg, src);
     }
 
-    /* execute the kernel */
-    context->enqueue_kernel(req.get_cmdq_id(), kernel_name);
+    /* read event info */
+    unsigned int num_events = 0;
+    int* event_list_ids = nullptr;
+    int event_id = -1;
+    auto einfo_ptr = req.get_eventinfo();
+    if(einfo_ptr != nullptr)
+    {
+      auto einfo = (funky_msg::event_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) einfo_ptr, sizeof(funky_msg::event_info*));
+      num_events = einfo->wait_event_num;
+      event_list_ids = (num_events > 0)? (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) einfo->wait_event_ids, sizeof(int) * num_events): nullptr;
+      event_id = einfo->id; 
+    }
 
+    /* execute the kernel */
+    context->enqueue_kernel(req.get_cmdq_id(), kernel_name, num_events, event_list_ids, event_id);
+
+    DEBUG_STREAM("EXEC request is finished. ");
     return 0;
   }
 
@@ -115,9 +143,45 @@ namespace funky_backend {
   int handle_sync_request(struct ukvm_hv *hv, funky_backend::XoclContext* context, funky_msg::request& req)
   {
     // TIMER_START(2);
-    // std::cout << "UKVM: received a SYNC request." << std::endl;
+    DEBUG_STREAM("received a SYNC request.");
+    /* clFinish() */
+    switch(req.get_sync_type())
+    {
+      case funky_msg::FINISH:
+      {
+        DEBUG_STREAM("calling clFinish()...");
+        context->sync_fpga(req.get_cmdq_id());
+        break;
+      }
+      case funky_msg::PROFILE:
+      {
+        DEBUG_STREAM("calling clGetEventProfilingInfo()...");
+        auto ptr     = req.get_eventinfo();
+        if(ptr == nullptr) {
+          DEBUG_STREAM("Error: ptr to event info is null.");
+          exit(1);
+        }
 
-    context->sync_fpga(req.get_cmdq_id());
+        auto einfo   = (funky_msg::event_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::event_info*));
+        auto eparam  = (uint64_t *) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) einfo->param, sizeof(uint64_t));
+        DEBUG_STREAM("event id: " << einfo->id << ", param name: " << std::hex << einfo->param_name << ", param ptr: " << einfo->param << ", eparam: " << eparam);
+        context->get_profiling_info(einfo->id, (cl_profiling_info) einfo->param_name, (void*) eparam);
+        DEBUG_STREAM("profiling is finished.");
+
+        break;
+      }
+      case funky_msg::WAITEVENTS:
+      {
+        DEBUG_STREAM("calling clWaitForEvents()...");
+        auto ptr     = req.get_eventinfo();
+        auto einfo   = (funky_msg::event_info*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) ptr, sizeof(funky_msg::event_info*));
+        auto elist   = (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) einfo->wait_event_ids, sizeof(int) * einfo->wait_event_num);
+        
+        context->wait_for_events(einfo->wait_event_num, elist);
+        break;
+      }
+    }
+
     context->send_response(funky_msg::SYNC);
     // TIMER_STOP_ID(2);
 
