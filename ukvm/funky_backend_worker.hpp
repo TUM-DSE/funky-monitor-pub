@@ -92,7 +92,6 @@ namespace funky_backend {
    */
   int handle_exec_request(struct ukvm_hv *hv, funky_backend::XoclContext* context, funky_msg::request& req)
   {
-    // std::cout << "UKVM: received an EXECUTE request." << std::endl;
     DEBUG_STREAM("received EXEC request. ");
 
     /* read arginfo from the guest memory */
@@ -138,12 +137,14 @@ namespace funky_backend {
       num_events = einfo->wait_event_num;
       event_list_ids = (num_events > 0)? (int*) UKVM_CHECKED_GPA_P(hv, (ukvm_gpa_t) einfo->wait_event_ids, sizeof(int) * num_events): nullptr;
       event_id = einfo->id; 
-
       DEBUG_STREAM("received event_info. id: " << einfo->id << ", num_events: " << num_events << ", list_addr: " << einfo->wait_event_ids);
     }
 
     /* execute the kernel */
-    context->enqueue_kernel(req.get_cmdq_id(), kernel_name, num_events, event_list_ids, event_id);
+    size_t ndparams[3];
+    req.get_ndrange_params(ndparams[0], ndparams[1], ndparams[2]);
+    DEBUG_STREAM("offset=" << ndparams[0] << ", global=" << ndparams[1] << ", local=" << ndparams[2]);
+    context->enqueue_kernel(req.get_cmdq_id(), kernel_name, ndparams, num_events, event_list_ids, event_id);
 
     DEBUG_STREAM("EXEC request is done. ");
     return 0;

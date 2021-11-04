@@ -243,7 +243,7 @@ namespace funky_backend {
       /**
        * launch the kernel 
        */
-      void enqueue_kernel(int cmdq_id, const char* kernel_name, unsigned int num_events, int* event_list_ids, int event_id)
+      void enqueue_kernel(int cmdq_id, const char* kernel_name, size_t ndparams[3], unsigned int num_events, int* event_list_ids, int event_id)
       {
         cl_int err;
         auto id = kernel_name;
@@ -267,7 +267,8 @@ namespace funky_backend {
         /* TODO: support for enqueueNDRangeKernel() */
         // For HLS kernels global and local size is always (1,1,1). So, it is recommended
         // to always use enqueueTask() for invoking HLS kernel
-        OCL_CHECK(err, err = queues[cmdq_id].enqueueTask(kernels[id], list_ptr, event_ptr));
+        // OCL_CHECK(err, err = queues[cmdq_id].enqueueTask(kernels[id], list_ptr, event_ptr));
+        OCL_CHECK(err, err = queues[cmdq_id].enqueueNDRangeKernel(kernels[id], ndparams[0], ndparams[1], ndparams[2], list_ptr, event_ptr));
 
         sync_flag = false;
         updated_flag = true;

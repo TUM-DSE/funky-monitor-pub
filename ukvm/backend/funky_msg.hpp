@@ -121,6 +121,7 @@ namespace funky_msg {
       /* for EXECUTE request */
       const char* kernel_name;
       size_t name_size;
+      size_t ndrange[3]; // {global work offset, global work size, local work size}
       uint32_t arg_num; 
       arg_info *args; 
 
@@ -162,7 +163,7 @@ namespace funky_msg {
       }
 
       /* for EXEC request */
-      request(ReqType type, const char* name, size_t size, uint32_t num, void* ptr, uint32_t cl_cmdq_id, event_info* event_info)
+      request(ReqType type, const char* name, size_t size, uint32_t num, void* ptr, uint32_t cl_cmdq_id, const size_t* ndrange_ptr, event_info* event_info)
         : request(type)
       {
         // TODO: error if type != EXEC
@@ -171,6 +172,9 @@ namespace funky_msg {
         arg_num = num;
         args    = (arg_info*) ptr;
         cmdq_id = cl_cmdq_id;
+        for(auto i=0; i<3; i++)
+          ndrange[i] = ndrange_ptr[i];
+
         evinfo = event_info;
       }
 
@@ -200,6 +204,13 @@ namespace funky_msg {
       const char* get_kernel_name(size_t& size) {
         size = name_size;
         return kernel_name;
+      }
+
+      void get_ndrange_params(size_t& offset, size_t& global, size_t& local)
+      {
+        offset = ndrange[0];
+        global = ndrange[1];
+        local  = ndrange[2];
       }
 
       // TODO: merge the following functions into get_metadata() ?
