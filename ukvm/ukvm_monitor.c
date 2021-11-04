@@ -50,6 +50,7 @@ static char *save_file;
 static void handle_mon_com(char *com_mon, pthread_t thr)
 {
     size_t len;
+    static struct fpga_thr_info thr_info = {0};
 
     len = strlen(com_mon);
     /* Discard the new line character from the command */
@@ -90,6 +91,54 @@ static void handle_mon_com(char *com_mon, pthread_t thr)
         return;
     }
 
+    /*
+     * Save fpga command will save the fpga state and data
+     * Moreoer the fpga execution will be stopped.
+     */
+    if (strcmp(com_mon, "save_fpga") == 0) {
+	if(is_fpga_worker_alive()) {
+		struct thr_msg* rcv_msg;
+		struct thr_msg* data_msg = NULL;
+		struct thr_msg msg = {MSG_SAVEFPGA, NULL, 0};
+
+		printf("MON-THR: start save_fpga() ...\n");
+		rcv_msg = recv_msg_from_worker();
+		if(rcv_msg->msg_type != MSG_INIT)
+			printf("Warning: not MSG_INIT \n");
+
+		send_msg_to_worker(&msg);
+		rcv_msg = recv_msg_from_worker();
+		if(rcv_msg->msg_type != MSG_SYNCED)
+		    printf("Warning: not MSG_SYNCED \n");
+
+		rcv_msg = recv_msg_from_worker();
+		memcpy(&thr_info, rcv_msg->data, sizeof(struct fpga_thr_info));
+		if(rcv_msg->msg_type == MSG_UPDATED)
+			data_msg = recv_msg_from_worker();
+
+		if (data_msg) {
+			thr_info.mig_size = data_msg->size;
+			thr_info.mig_data = malloc(data_msg->size);
+			if (thr_info.mig_data == NULL)
+				errx(1, "Out of memroy\n");
+			memcpy(thr_info.mig_data, data_msg->data, data_msg->size);
+		}
+		destroy_fpga_worker();
+		printf("FPGA context has been saved\n");
+	} else {
+		warnx("Fpga worker is not running\n");
+	}
+        return;
+    }
+
+    /*
+     * Load fpga command will resume fpga execution using the data
+     * which were previously saved using savefpga command.
+     */
+    if (strcmp(com_mon, "load_fpga") == 0) {
+	create_fpga_worker(thr_info);
+        return;
+    }
     /*
      * Savevm command will save vm state in the file specified after the
      * command.
