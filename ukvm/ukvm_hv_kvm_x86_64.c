@@ -213,7 +213,7 @@ int ukvm_hv_vcpu_loop(struct ukvm_hv *hv)
                 savefpga(hv);
                 clock_gettime(CLOCK_MONOTONIC, &end);
                 printf("savevm(): %lf s\n", (double)(end.tv_sec - start.tv_sec) + ((double)(end.tv_nsec - start.tv_nsec) / 1000000000L) );
-                errx(1, "Stopped to save VM state");
+                errx(7, "Stopped to save VM state");
             }
         }
         if (ret == -1) {
