@@ -1,7 +1,7 @@
 .PHONY: all
 all: primary daemon rest
 
-SCHED_CFLAGS  := -Wall -Werror -O2 -g
+SCHED_CFLAGS  += -Wall -Werror -O2
 SCHED_LDFLAGS := -lpthread
 
 primary: primary.o common.o
@@ -11,7 +11,7 @@ daemon: daemon.o common.o
 	$(CC) $(SCHED_LDFLAGS) $^ -o $@
 
 primary.o: primary.c
-	$(CC) $(SCHED_CFLAGS) -std=c99 -c $< -o $@
+	$(CC) $(SCHED_CFLAGS) -D_POSIX_C_SOURCE=199309L -std=c99 -c $< -o $@
 
 daemon.o: daemon.c
 	$(CC) $(SCHED_CFLAGS) -c $< -o $@

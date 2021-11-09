@@ -11,12 +11,17 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 #include "common.h"
 
 #define BIN_PATH_LEN	256
 #define ARGS_LEN	128
 #define FRONT_CMD_LEN	400
+
+//#define TIME_NCOM 1
+//#define TIME_TASK 1
+//#define TIME_ALGO 1
 
 /*
  * The state of a task. For the time being
@@ -59,6 +64,11 @@ struct task {
 	struct node *node;	// the node where the task has been deployed
 	struct task *next;
 	struct task *prev;
+#ifdef TIME_TASK
+	struct timespec tstart;
+	long secs;
+	long nsecs;
+#endif
 };
 
 struct node {
@@ -179,6 +189,9 @@ static struct task *create_new_task(char *path, uint8_t priority, char *args)
 			return NULL;
 		}
 	}
+#ifdef TIME_TASK
+	clock_gettime(CLOCK_MONOTONIC, &new_task->tstart);
+#endif
 
 	return new_task;
 }
@@ -516,13 +529,36 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd,
 			}
 
 			msg_node = (struct msg_to_worker *) efval;
-			if (msg_node->type == deploy || msg_node->type == evict)
+#ifdef TIME_NCOM
+			struct timespec start, end;
+			clock_gettime(CLOCK_MONOTONIC, &start);
+#endif
+			if (msg_node->type == deploy || msg_node->type == evict) {
 				rc = send_file(con, msg_node->tsk->bin_path,
 						msg_node->type);
-			else if (msg_node->type == migrate)
+#ifdef TIME_NCOM
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				printf("Sending command and binary took %ld ms\n",
+					(end.tv_sec - start.tv_sec)*1000 +
+					(end.tv_nsec - start.tv_nsec)/1000000);
+#endif
+			} else if (msg_node->type == migrate) {
 				rc = send_migration_command(msg_node->node, con);
-			else if (msg_node->type == resume)
+#ifdef TIME_NCOM
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				printf("Sending command took %ld ms\n",
+					(end.tv_sec - start.tv_sec)*1000 +
+					(end.tv_nsec - start.tv_nsec)/1000000);
+#endif
+			} else if (msg_node->type == resume) {
 				rc = send_resume_command(con);
+#ifdef TIME_NCOM
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				printf("Sending command took %ld ms\n",
+					(end.tv_sec - start.tv_sec)*1000 +
+					(end.tv_nsec - start.tv_nsec)/1000000);
+#endif
+			}
 			if (rc < 0) {
 				free(msg_node);
 				return -1;
@@ -892,10 +928,14 @@ static void scheduler_algorithm(struct node *nhead, struct task *thead,
 	struct node *node_prior = NULL;
 	struct task *tsk_tmp = NULL, *tsk_avail = NULL;
 
+#if !defined(TIME_NCOM) && !defined(TIME_ALGO) && !defined (TIME_TASK)
 	printf("----------------- Tasks ----------------\n");
+#endif
 	tsk_tmp = thead;
 	while(tsk_tmp) {
+#if !defined(TIME_NCOM) && !defined(TIME_ALGO) && !defined (TIME_TASK)
 		printf("Task id %d with state %d, priority %hhu and bin at %s and args %s\n", tsk_tmp->id,tsk_tmp->state, tsk_tmp->priority, tsk_tmp->bin_path, tsk_tmp->bin_args ? tsk_tmp->bin_args : "");
+#endif
 		if (tsk_tmp->state == stopped && tsk_tmp->node->state == available) {
 			tsk_avail = tsk_tmp;
 			node_avail = tsk_tmp->node;
@@ -904,18 +944,24 @@ static void scheduler_algorithm(struct node *nhead, struct task *thead,
 			tsk_avail = tsk_tmp;
 		tsk_tmp = tsk_tmp->next;
 	}
+#if !defined(TIME_NCOM) && !defined(TIME_ALGO) && !defined (TIME_TASK)
 	printf("----------------------------------------\n");
 	printf("----------------- Nodes ----------------\n");
+#endif
 	node_tmp = nhead;
 	while(node_tmp) {
+#if !defined(TIME_NCOM) && !defined(TIME_ALGO) && !defined (TIME_TASK)
 		printf("Node with id %d state %d\n", node_tmp->id, node_tmp->state);
+#endif
 		if ((node_tmp->state == low_prio) && !node_prior)
 			node_prior = node_tmp;
 		if ((node_tmp->state == available) && !node_avail)
 			node_avail = node_tmp;
 		node_tmp = node_tmp->next;
 	}
+#if !defined(TIME_NCOM) && !defined(TIME_ALGO) && !defined (TIME_TASK)
 	printf("----------------------------------------\n");
+#endif
 	*pick_n = node_avail;
 	*pick_t = tsk_avail;
 	if (!tsk_avail)
@@ -1045,6 +1091,12 @@ int main()
 				task_tmp = node_tmp->task;
 				node_tmp->state = available;
 				node_tmp->task = NULL;
+#if TIME_TASK
+				struct timespec end;
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				task_tmp->secs = end.tv_sec - task_tmp->tstart.tv_sec;
+				task_tmp->nsecs = end.tv_nsec - task_tmp->tstart.tv_nsec;
+#endif
 
 				if (task_tmp->next != NULL)
 					task_tmp->next->prev = task_tmp->prev;
@@ -1053,9 +1105,9 @@ int main()
 				}
 				printf("Task with id %d ", task_tmp->id);
 				if (new_msg->nres.res == 4)
-					printf("terminated successfully\n");
+					printf("terminated successfully");
 				else if (new_msg->nres.res == 5)
-					printf("failed\n");
+					printf("failed");
 				if (task_tmp->priority == 0) {
 					remove_task(&htsk_head, &htsk_last,
 							task_tmp);
@@ -1063,6 +1115,11 @@ int main()
 					remove_task(&ltsk_head, &ltsk_last,
 							task_tmp);
 				}
+#if TIME_TASK
+				printf(" in %ld ms\n", task_tmp->secs*1000 + task_tmp->nsecs/1000000);
+#else
+				printf("\n");
+#endif
 				free(task_tmp->bin_path);
 				free(task_tmp->bin_args);
 				free(task_tmp);
@@ -1088,6 +1145,10 @@ int main()
 			free(new_msg);
 		}
 
+#if TIME_ALGO
+		struct timespec algo_start, algo_end;
+		clock_gettime(CLOCK_MONOTONIC, &algo_start);
+#endif
 		if (htsk_last != NULL) {
 			htsk_last->next = ltsk_head;
 			scheduler_algorithm(node_head, htsk_head, &node_avail,
@@ -1097,6 +1158,13 @@ int main()
 			scheduler_algorithm(node_head, ltsk_head, &node_avail,
 					&tsk_avail);
 		}
+#if TIME_ALGO
+		clock_gettime(CLOCK_MONOTONIC, &algo_end);
+		printf(" Scheduling algorithm took %ld ms\n",
+			(algo_end.tv_sec - algo_start.tv_sec)*1000 +
+			(algo_end.tv_nsec - algo_start.tv_nsec)/1000000);
+
+#endif
 		if (!tsk_avail || !node_avail)
 			continue;
 		/*
