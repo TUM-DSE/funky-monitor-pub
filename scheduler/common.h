@@ -22,6 +22,16 @@ enum mnode_type {
 };
 
 /*
+ * A struct which contains the result of a task execution
+ * In case the task which completed was the evicted one then the
+ * is_evicted value wil lbe set.
+ */
+struct tsk_res {
+	uint8_t exit_code;
+	uint8_t is_evicted;
+};
+
+/*
  * A struct which contains a message to a node.
  * This message precedes file transmission and in case of migration
  * notifies the daemon about the new node where task will migrate.

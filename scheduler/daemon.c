@@ -409,7 +409,7 @@ ret_1:
 /*
  * Handle a change in child's process state
  */
-static int handle_sigchld(int sigfd)
+static int handle_sigchld(int sigfd, pid_t *p_id)
 {
 	int rc;
 	struct signalfd_siginfo sinfo;
@@ -423,15 +423,19 @@ static int handle_sigchld(int sigfd)
 		return -1;
 	}
 	if (sinfo.ssi_signo == SIGCHLD) {
+		pid_t chld;
+
 		/*
 		 * Do not let our child turn to zombie
 		 */
-		if (wait(NULL) < 0) {
+		chld = wait(NULL);
+		if (chld < 0) {
 			perror("wait child");
 			return -1;
 		}
+		*p_id = chld;
 
-		printf("My child died with code %d\n", sinfo.ssi_status);
+		printf("My child %d died with code %d\n", chld, sinfo.ssi_status);
 		if (sinfo.ssi_status == 0) {
 			/*
 			 * Successful execution
@@ -511,15 +515,18 @@ err_out:
  * Send the execution result to primary scheduler.
  * The result is the exit status of the ukvm process
  */
-static int send_deploy_res(int socket, int res)
+static int send_deploy_res(int socket, int res, uint8_t who)
 {
 	ssize_t rc;
+	struct tsk_res tres;
 
-	rc = write(socket, &res, sizeof(int));
+	tres.is_evicted = who;
+	tres.exit_code = res;
+	rc = write(socket, &tres, sizeof(struct tsk_res));
 	if (rc < 0) {
 		perror("Send result to primary\n");
 		return -1;
-	} else if (rc < sizeof(int)) {
+	} else if (rc < sizeof(struct tsk_res)) {
 		err_print("Short write on execution result\n");
 		return -1;
 	}
@@ -528,12 +535,12 @@ static int send_deploy_res(int socket, int res)
 
 int main(int argc, char *argv[])
 {
-	int rc, sched_sock, port = 0, epollfd, sfd, server_soc;
+	int rc, rc1 = 0, sched_sock, port = 0, epollfd, sfd, server_soc;
 	struct sockaddr_in sockaddr = {0};
 	char *ip_addr = NULL;
 	struct epoll_event ev;
 	sigset_t schld_set;
-	struct ukvm_ps *instance = NULL;
+	struct ukvm_ps *instance[2] = {0};
 
 	/*
 	 * Get ip address and port of the primary scheduler
@@ -641,11 +648,15 @@ int main(int argc, char *argv[])
 		for (i = 0; i < epoll_ret; i++) {
 
 			if (events[i].data.fd == sched_sock) {
-				instance = msg_from_primary(sched_sock, &rc);
+				struct ukvm_ps *ups = msg_from_primary(sched_sock, &rc);
 				if (rc < 0)
 					goto out_sfd;
+				instance[rc] = ups;
 			} else if (events[i].data.fd == sfd) {
-				rc = handle_sigchld(sfd);
+				struct ukvm_ps *tmp_ups;
+				pid_t ch_pid = -1;
+
+				rc = handle_sigchld(sfd, &ch_pid);
 				if (rc < 0)
 					goto out_sfd;
 				if (rc == 0)
@@ -663,14 +674,32 @@ int main(int argc, char *argv[])
 						(end.tv_nsec - start.tv_nsec)/1000000);
 #endif
 				}
+				if (instance[0]->pid == ch_pid) {
+					tmp_ups = instance[0];
+				} else  {
+					tmp_ups = instance[1];
+					if (tmp_ups == NULL) {
+						err_print("Child process id does not match\n");
+						goto out_sfd;
+					}
+					if (tmp_ups->pid != ch_pid) {
+						err_print("Child process id does not match\n");
+						goto out_sfd;
+					}
+				}
+
 				// report execution result to primary
-				free(instance);
-				instance = NULL;
-				if (send_deploy_res(sched_sock, rc) < 0)
+				if (tmp_ups == instance[0] && instance[1] != NULL)
+					rc1 = send_deploy_res(sched_sock, rc, 1);
+				else
+					rc1 = send_deploy_res(sched_sock, rc, 0);
+				free(tmp_ups);
+				tmp_ups = NULL;
+				if (rc1 < 0)
 					goto out_socs;
 			} else if (events[i].data.fd == server_soc) {
-				instance = rcv_start_migrated_guest(server_soc);
-				if (instance == NULL)
+				instance[0] = rcv_start_migrated_guest(server_soc);
+				if (instance[0] == NULL)
 					goto out_sfd;
 			}
 		}

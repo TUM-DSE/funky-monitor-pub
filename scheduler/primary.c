@@ -92,6 +92,7 @@ struct node {
 struct node_result {
 	struct node *node;
 	int res;
+	uint8_t is_evicted;
 };
 
 /*
@@ -482,13 +483,13 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd,
 			 * Read it and report it back to main thread.
 			 */
 			struct notify_msg *nmsg = NULL;
-			int node_msg = 0;
+			struct tsk_res tres = {0};
 
-			rc = read(con, &node_msg, sizeof(int));
+			rc = read(con, &tres, sizeof(struct tsk_res));
 			if (rc == 0) {
 				printf("Connection closed\n");
 				return -1;
-			} else if (rc < sizeof(int)) {
+			} else if (rc < sizeof(struct tsk_res)) {
 				err_print("Short read in node's message\n");
 				return -1;
 			}
@@ -498,7 +499,7 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd,
 			 * For the time being we ignore that info, but
 			 * we might want to revisit this in the future.
 			 */
-			if (node_msg == 7)
+			if (tres.exit_code == 7)
 				continue;
 
 			nmsg = malloc(sizeof(struct notify_msg));
@@ -508,7 +509,8 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd,
 			}
 			nmsg->type = node_ret;
 			nmsg->nres.node = nd;
-			nmsg->nres.res = node_msg;
+			nmsg->nres.res = tres.exit_code;
+			nmsg->nres.is_evicted = tres.is_evicted;
 
 			rc = write(snd_efd, &nmsg, sizeof(uint64_t));
 			if (rc < 0) {
@@ -1087,8 +1089,11 @@ int main()
 				struct node *node_tmp;
 				struct task *task_tmp;
 
-				node_tmp = new_msg->nres.node;;
-				task_tmp = node_tmp->task;
+				node_tmp = new_msg->nres.node;
+				if (new_msg->nres.is_evicted == 0)
+					task_tmp = node_tmp->task;
+				else 
+					task_tmp = node_tmp->ev_task;
 				node_tmp->state = available;
 				node_tmp->task = NULL;
 #if TIME_TASK
