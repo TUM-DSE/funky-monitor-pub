@@ -92,7 +92,7 @@ struct node {
 struct node_result {
 	struct node *node;
 	int res;
-	uint8_t is_evicted;
+	uint32_t id;
 };
 
 /*
@@ -432,9 +432,9 @@ static ssize_t send_bin_args(int soc, const char *args)
 
 	node_com.type = arguments;
 	if (args != NULL)
-		node_com.size = strlen(args);
+		node_com.args_size = strlen(args);
 	else
-		node_com.size = 0;
+		node_com.args_size = 0;
 	rc = write(soc, &node_com, sizeof(struct com_nod));
 	if (rc < sizeof(struct com_nod)) {
 		if (rc < 0)
@@ -444,8 +444,8 @@ static ssize_t send_bin_args(int soc, const char *args)
 		return -1;
 	}
 	if (args != NULL) {
-		rc = write(soc, args, node_com.size);
-		if (rc < node_com.size) {
+		rc = write(soc, args, node_com.args_size);
+		if (rc < node_com.args_size) {
 			if (rc < 0)
 				perror("Sending args");
 			else
@@ -510,7 +510,7 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd,
 			nmsg->type = node_ret;
 			nmsg->nres.node = nd;
 			nmsg->nres.res = tres.exit_code;
-			nmsg->nres.is_evicted = tres.is_evicted;
+			nmsg->nres.id = tres.id;
 
 			rc = write(snd_efd, &nmsg, sizeof(uint64_t));
 			if (rc < 0) {
@@ -537,7 +537,7 @@ static int handle_node_comm(int epollfd, int con, int sched_efd, int snd_efd,
 #endif
 			if (msg_node->type == deploy || msg_node->type == evict) {
 				rc = send_file(con, msg_node->tsk->bin_path,
-						msg_node->type);
+						msg_node->type, msg_node->tsk->id);
 #ifdef TIME_NCOM
 				clock_gettime(CLOCK_MONOTONIC, &end);
 				printf("Sending command and binary took %ld ms\n",
@@ -1089,25 +1089,32 @@ int main()
 				struct node *node_tmp;
 				struct task *task_tmp;
 
+				printf("komple ws edw %d\n", __LINE__);
 				node_tmp = new_msg->nres.node;
-				if (new_msg->nres.is_evicted == 0)
+				printf("komple ws edw %d\n", __LINE__);
+				if (new_msg->nres.id == node_tmp->task->id) {
 					task_tmp = node_tmp->task;
-				else 
+					node_tmp->state = available;
+					node_tmp->task = NULL;
+				} else {
 					task_tmp = node_tmp->ev_task;
-				node_tmp->state = available;
-				node_tmp->task = NULL;
+					node_tmp->ev_task = NULL;
+				}
 #if TIME_TASK
 				struct timespec end;
 				clock_gettime(CLOCK_MONOTONIC, &end);
 				task_tmp->secs = end.tv_sec - task_tmp->tstart.tv_sec;
 				task_tmp->nsecs = end.tv_nsec - task_tmp->tstart.tv_nsec;
 #endif
+				printf("komple ws edw %d\n", __LINE__);
 
 				if (task_tmp->next != NULL)
 					task_tmp->next->prev = task_tmp->prev;
+				printf("komple ws edw %d\n", __LINE__);
 				if (task_tmp->prev != NULL) {
 					task_tmp->prev->next = task_tmp->next;
 				}
+				printf("komple ws edw %d\n", __LINE__);
 				printf("Task with id %d ", task_tmp->id);
 				if (new_msg->nres.res == 4)
 					printf("terminated successfully");

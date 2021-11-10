@@ -32,6 +32,7 @@ static struct in_addr to_node;
 
 struct ukvm_ps {
 	pid_t pid;
+	uint32_t id;
 	char socket[30];
 	char binary[30];
 	char net[30];
@@ -122,24 +123,24 @@ static ssize_t receive_mig_files(int socket, char *file)
 		err_print("Invalid message type from other node\n");
 		return -1;
 	}
-	printf("size of binary is %ld\n", node_com.size);
+	printf("size of binary is %ld\n", node_com.tsk.size);
 
-	buf = read_file_n(socket, node_com.size);
+	buf = read_file_n(socket, node_com.tsk.size);
 	if (!buf)
 		return -1;
 
-	rc = write_file_n(buf, node_com.size, file);
+	rc = write_file_n(buf, node_com.tsk.size, file);
 	free(buf);
 	if (rc < 0)
 		return -1;
 
-	return 0;
+	return node_com.tsk.id;
 }
 
 /*
  * Send migration file to an another node
  */
-static void transmit_mig_file()
+static void transmit_mig_file(int id)
 {
 	int sockfd, rc;
 	struct sockaddr_in addr = {0};
@@ -153,11 +154,11 @@ static void transmit_mig_file()
 		return;
 	}
 
-	rc = send_file(sockfd, "/tmp/binary_0.ukvm", migrate);
+	rc = send_file(sockfd, "/tmp/binary_0.ukvm", migrate, id);
 	if (rc < 0)
 		return;
 
-	rc = send_file(sockfd, "/tmp/file.mig", migrate);
+	rc = send_file(sockfd, "/tmp/file.mig", migrate, id);
 	if (rc < 0)
 		return;
 }
@@ -272,17 +273,17 @@ static char *rcv_args(int socket, int *rc)
 		*rc = -1;
 		return NULL;
 	}
-	if (nargs_com.size == 0) {
+	if (nargs_com.args_size == 0) {
 		*rc = 0;
 		return NULL;
 	}
-	args = malloc(nargs_com.size);
+	args = malloc(nargs_com.args_size);
 	if (args == NULL) {
 		err_print("Out of memory\n");
 		return NULL;
 	}
-	*rc = read(socket, args, nargs_com.size);
-	if (*rc < nargs_com.size) {
+	*rc = read(socket, args, nargs_com.args_size);
+	if (*rc < nargs_com.args_size) {
 		err_print("Lost connection with primary scheduler\n");
 		if (*rc < 0)
 			perror("Read message from primary\n");
@@ -327,13 +328,14 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 		/*
 		 * Receive and store the binary to deploy
 		 */
-		buf = read_file_n(socket, node_com.size);
+		buf = read_file_n(socket, node_com.tsk.size);
 		if (!buf)
 			goto ret_1;
 
 		sprintf(ps_ukvm->binary, "/tmp/binary_0.ukvm");
 		sprintf(ps_ukvm->socket, "--mon=/tmp/ukvm0.sock");
-		rc = write_file_n(buf, node_com.size, ps_ukvm->binary);
+		ps_ukvm->id = node_com.tsk.id;
+		rc = write_file_n(buf, node_com.tsk.size, ps_ukvm->binary);
 		free(buf);
 		if (rc < 0)
 			goto ret_1;
@@ -355,13 +357,14 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 		/*
 		 * Receive and store the binary to deploy
 		 */
-		buf = read_file_n(socket, node_com.size);
+		buf = read_file_n(socket, node_com.tsk.size);
 		if (!buf)
 			goto ret_1;
 
 		sprintf(ps_ukvm->binary, "/tmp/binary_1.ukvm");
 		sprintf(ps_ukvm->socket, "--mon=/tmp/ukvm1.sock");
-		rc = write_file_n(buf, node_com.size, ps_ukvm->binary);
+		ps_ukvm->id = node_com.tsk.id;
+		rc = write_file_n(buf, node_com.tsk.size, ps_ukvm->binary);
 		free(buf);
 		if (rc < 0)
 			goto ret_1;
@@ -488,9 +491,10 @@ static struct ukvm_ps *rcv_start_migrated_guest(int server_soc)
 	rc = receive_mig_files(mig_soc, ps_ukvm->binary);
 	if (rc < 0)
 		goto err_out;
+	ps_ukvm->id = rc;
 
 	rc = receive_mig_files(mig_soc, ps_ukvm->mig_file + 7);
-	if (rc < 0)
+	if (rc < 0 || rc != ps_ukvm->id)
 		goto err_out;
 
 	/*
@@ -515,12 +519,12 @@ err_out:
  * Send the execution result to primary scheduler.
  * The result is the exit status of the ukvm process
  */
-static int send_deploy_res(int socket, int res, uint8_t who)
+static int send_deploy_res(int socket, int res, uint32_t id)
 {
 	ssize_t rc;
 	struct tsk_res tres;
 
-	tres.is_evicted = who;
+	tres.id = id;
 	tres.exit_code = res;
 	rc = write(socket, &tres, sizeof(struct tsk_res));
 	if (rc < 0) {
@@ -666,7 +670,7 @@ int main(int argc, char *argv[])
 					struct timespec start, end;
 					clock_gettime(CLOCK_MONOTONIC, &start);
 #endif
-					transmit_mig_file();
+					transmit_mig_file(instance[0]->id);
 #if TIME_MIG
 					clock_gettime(CLOCK_MONOTONIC, &end);
 					printf("Transmitting migration files took %ld ms\n",
@@ -676,7 +680,7 @@ int main(int argc, char *argv[])
 				}
 				if (instance[0]->pid == ch_pid) {
 					tmp_ups = instance[0];
-				} else  {
+				} else {
 					tmp_ups = instance[1];
 					if (tmp_ups == NULL) {
 						err_print("Child process id does not match\n");
@@ -689,10 +693,8 @@ int main(int argc, char *argv[])
 				}
 
 				// report execution result to primary
-				if (tmp_ups == instance[0] && instance[1] != NULL)
-					rc1 = send_deploy_res(sched_sock, rc, 1);
-				else
-					rc1 = send_deploy_res(sched_sock, rc, 0);
+				printf("id of task is %d\n", tmp_ups->id);
+				rc1 = send_deploy_res(sched_sock, rc, tmp_ups->id);
 				free(tmp_ups);
 				tmp_ups = NULL;
 				if (rc1 < 0)

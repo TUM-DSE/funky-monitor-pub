@@ -28,7 +28,12 @@ enum mnode_type {
  */
 struct tsk_res {
 	uint8_t exit_code;
-	uint8_t is_evicted;
+	uint32_t id;
+};
+
+struct tsk_dpl {
+	off_t size;
+	uint32_t id;
 };
 
 /*
@@ -39,12 +44,13 @@ struct tsk_res {
 struct com_nod {
 	enum mnode_type type;
 	union {
-		off_t size;
+		struct tsk_dpl tsk;
 		struct in_addr rcv_ip;
+		size_t args_size;
 	};
 };
 
 int setup_socket(int epollfd, struct sockaddr *saddr, uint8_t tobind);
-ssize_t send_file(int socket, const char *filename, enum mnode_type msg_type);
+ssize_t send_file(int socket, const char *filename, enum mnode_type msg_type, uint32_t id);
 
 #endif /* SCHED_COMMON_H */

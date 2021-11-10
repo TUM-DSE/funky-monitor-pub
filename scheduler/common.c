@@ -71,7 +71,8 @@ err_set:
 /*
  * Send a file over a socket
  */
-ssize_t send_file(int socket, const char *filename, enum mnode_type msg_type)
+ssize_t send_file(int socket, const char *filename, enum mnode_type msg_type,
+		  uint32_t id)
 {
 	int rc = 0, fd;
 	struct stat st;
@@ -94,7 +95,8 @@ ssize_t send_file(int socket, const char *filename, enum mnode_type msg_type)
 	}
 
 	node_com.type = msg_type;
-	node_com.size = st.st_size;
+	node_com.tsk.size = st.st_size;
+	node_com.tsk.id = id;
 	rc = write(socket, &node_com, sizeof(struct com_nod));
 	if (rc < sizeof(struct com_nod)) {
 		if (rc < 0)
