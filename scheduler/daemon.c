@@ -16,6 +16,7 @@
 #include <sys/sendfile.h>
 
 #include <signal.h>
+#include <time.h>
 
 #include "common.h"
 
@@ -24,6 +25,8 @@
 #define GUEST_BIN_PATH	"/tmp/binary.ukvm"
 #define PORT_NODES	1742
 #define LOCALHOST	(((127&0xff) << 24) | ((0&0xff) << 16) | ((0&0xff) << 8) | 1)
+
+//#define TIME_MIG 1
 
 static struct in_addr to_node;
 
@@ -366,7 +369,7 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 		if (rc < 0)
 			goto ret_1;
 		// Stop current task
-		if (send_ukvm_cmd("stop", "/tmp/ukvm0.sock") < 0)
+		if (send_ukvm_cmd("save_fpga", "/tmp/ukvm0.sock") < 0)
 			goto ret_1;
 		// start new task
 		ps_ukvm->pid = start_guest(NULL, ps_ukvm->binary, "--net=tap1",
@@ -376,7 +379,7 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 		printf("Started ukvm guest with pid %d\n", ps_ukvm->pid);
 		*ret = 1;
 	} else if (node_com.type == resume) {
-		if (send_ukvm_cmd("resume", "/tmp/ukvm0.sock") < 0)
+		if (send_ukvm_cmd("load_fpga", "/tmp/ukvm0.sock") < 0)
 			goto ret_1;
 		*ret = 3;
 	} else if (node_com.type == mig_cmd) {
@@ -647,8 +650,19 @@ int main(int argc, char *argv[])
 					goto out_sfd;
 				if (rc == 0)
 					continue;
-				if (rc == 7)
+				if (rc == 7) {
+#if TIME_MIG
+					struct timespec start, end;
+					clock_gettime(CLOCK_MONOTONIC, &start);
+#endif
 					transmit_mig_file();
+#if TIME_MIG
+					clock_gettime(CLOCK_MONOTONIC, &end);
+					printf("Transmitting migration files took %ld ms\n",
+						(end.tv_sec - start.tv_sec)*1000 +
+						(end.tv_nsec - start.tv_nsec)/1000000);
+#endif
+				}
 				// report execution result to primary
 				free(instance);
 				instance = NULL;
