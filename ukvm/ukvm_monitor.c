@@ -40,6 +40,11 @@ struct mon_thr_data {
 int vm_state;
 
 /*
+ * A global varible to keep fpga data for migration or eviction
+ */
+static struct fpga_thr_info *thr_info = NULL;
+
+/*
  * A global variable for the file in which VM will be stored
  */
 static char *save_file;
@@ -50,7 +55,6 @@ static char *save_file;
 static void handle_mon_com(char *com_mon, pthread_t thr)
 {
     size_t len;
-    static struct fpga_thr_info thr_info = {0};
 
     len = strlen(com_mon);
     /* Discard the new line character from the command */
@@ -101,6 +105,9 @@ static void handle_mon_com(char *com_mon, pthread_t thr)
 		struct thr_msg* data_msg = NULL;
 		struct thr_msg msg = {MSG_SAVEFPGA, NULL, 0};
 
+		thr_info = malloc(sizeof(struct fpga_thr_info));
+		if (thr_info == NULL)
+			errx(1, "Out of memory to save fpga thr info\n");
 		printf("MON-THR: start save_fpga() ...\n");
 		rcv_msg = recv_msg_from_worker();
 		if(rcv_msg->msg_type != MSG_INIT)
@@ -112,16 +119,16 @@ static void handle_mon_com(char *com_mon, pthread_t thr)
 		    printf("Warning: not MSG_SYNCED \n");
 
 		rcv_msg = recv_msg_from_worker();
-		memcpy(&thr_info, rcv_msg->data, sizeof(struct fpga_thr_info));
+		memcpy(thr_info, rcv_msg->data, sizeof(struct fpga_thr_info));
 		if(rcv_msg->msg_type == MSG_UPDATED)
 			data_msg = recv_msg_from_worker();
 
 		if (data_msg) {
-			thr_info.mig_size = data_msg->size;
-			thr_info.mig_data = malloc(data_msg->size);
-			if (thr_info.mig_data == NULL)
+			thr_info->mig_size = data_msg->size;
+			thr_info->mig_data = malloc(data_msg->size);
+			if (thr_info->mig_data == NULL)
 				errx(1, "Out of memroy\n");
-			memcpy(thr_info.mig_data, data_msg->data, data_msg->size);
+			memcpy(thr_info->mig_data, data_msg->data, data_msg->size);
 		}
 		destroy_fpga_worker();
 		printf("FPGA context has been saved\n");
@@ -136,7 +143,19 @@ static void handle_mon_com(char *com_mon, pthread_t thr)
      * which were previously saved using savefpga command.
      */
     if (strcmp(com_mon, "load_fpga") == 0) {
-	create_fpga_worker(thr_info);
+	struct thr_msg* rcv_msg;
+
+	    printf("i got save_fpga command\n");
+	create_fpga_worker(*thr_info);
+	rcv_msg = recv_msg_from_worker();
+	/*
+	 * We really need to do a better checking here...
+	 * Message queue does not seem to work correctly...
+	 */
+	if(rcv_msg->msg_type != MSG_INIT)
+		printf("Warning: not MSG_INIT \n");
+	free(thr_info);
+	thr_info = NULL;
         return;
     }
     /*
@@ -596,13 +615,19 @@ void savefpga(struct ukvm_hv *hv)
     /* update data header */
     struct fpga_data_header header = {0};
     if(state_msg) {
-        // warn("savefpga(): Worker is alive. \n");
+        warn("savefpga(): Worker is alive. \n");
+        header.sb_fpgainit = 1;
+    } else if (thr_info != NULL) {
+        warn("savefpga(): Worker is not alive, but we have fpga data\n");
         header.sb_fpgainit = 1;
     }
 
     if(data_msg) {
-        // warnx("savefpga(): got FPGA data, %lu Bytes at 0x%08lx\n", data_msg->size, (uint64_t) data_msg->data);
+        warnx("savefpga(): got FPGA data, %lu Bytes at 0x%08lx\n", data_msg->size, (uint64_t) data_msg->data);
         header.data_size = data_msg->size;
+    } else if (thr_info != NULL) {
+        warnx("savefpga(): got FPGA data, %lu Bytes at 0x%08lx\n", thr_info->mig_size, (uint64_t) thr_info->mig_data);
+        header.data_size = thr_info->mig_size;
     }
 
     /* open file */
@@ -623,7 +648,15 @@ void savefpga(struct ukvm_hv *hv)
 
     /* write FPGA thread info */
     if(state_msg) {
+	    warn("write state_msg\n");
         nbytes = write(fd, state_msg->data, sizeof(struct fpga_thr_info));
+        if (nbytes < 0) {
+            warn("savefpga(): Error writing fpga_thr_info");
+            return;
+        }
+    } else if (thr_info != NULL) {
+	    warn("write thr_info\n");
+        nbytes = write(fd, thr_info, sizeof(struct fpga_thr_info));
         if (nbytes < 0) {
             warn("savefpga(): Error writing fpga_thr_info");
             return;
@@ -632,11 +665,21 @@ void savefpga(struct ukvm_hv *hv)
 
     /* write FPGA data */
     if(data_msg) {
+	    warn("write data_msg\n");
         nbytes = write(fd, data_msg->data, data_msg->size);
         if (nbytes < 0) {
             warn("savefpga(): Error writing fpga_data");
             return;
         }
+    } else if (thr_info != NULL) {
+	if (thr_info->mig_data != NULL) {
+	    warn("write mig_data\n");
+            nbytes = write(fd, thr_info->mig_data, thr_info->mig_size);
+            if (nbytes < 0) {
+                warn("savefpga(): Error writing fpga_data");
+                return;
+            }
+	}
     }
 
     if(state_msg)

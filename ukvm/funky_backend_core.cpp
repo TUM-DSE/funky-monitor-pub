@@ -115,7 +115,7 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
     switch(req->msg_type) {
       case MSG_KILLWORKER:
       {
-        // std::cout << "MSG_KILLWORKER request has been received.\n";
+        std::cout << "MSG_KILLWORKER request has been received.\n";
         struct thr_msg end_msg = {MSG_END, NULL, 0};
         worker.send_msg(end_msg);
         return; // kill the thread by itself
@@ -185,6 +185,16 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
       auto p_thr_info = worker.get_thr_info();
       struct thr_msg init_msg = {MSG_INIT, p_thr_info, sizeof(struct fpga_thr_info)};
       worker.send_msg(init_msg);
+      req = worker.recv_msg();
+      while(req == nullptr)
+        req = worker.recv_msg();
+
+      if(req->msg_type != MSG_KILLWORKER)
+        std::cout << "Warning: received a different req: " << req->msg_type << "\n";
+
+      // std::cout << "Worker: going to be killed...\n";
+      struct thr_msg end_msg = {MSG_END, NULL, 0};
+      worker.send_msg(end_msg);
     }
   };
 
