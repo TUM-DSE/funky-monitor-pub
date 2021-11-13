@@ -23,7 +23,7 @@
 #define BIN_PATH_LEN	254
 #define UKVM_SOC	"/tmp/ukvm_socket"
 #define GUEST_BIN_PATH	"/tmp/binary.ukvm"
-#define PORT_NODES	1742
+#define PORT_NODES	1745
 #define LOCALHOST	(((127&0xff) << 24) | ((0&0xff) << 16) | ((0&0xff) << 8) | 1)
 
 //#define TIME_MIG 1
@@ -147,7 +147,7 @@ static void transmit_mig_file(int id)
 
 	memcpy(&addr.sin_addr, &to_node, sizeof(struct in_addr));
 	addr.sin_family = AF_INET;
-	addr.sin_port = htons(PORT_NODES);
+	addr.sin_port = htons(PORT_NODES+1);
 	sockfd = setup_socket(0, (struct sockaddr *) &addr, 0);
 	if (sockfd == -1) {
 		err_print("socket error %d\n", errno);
@@ -269,7 +269,7 @@ static char *rcv_args(int socket, int *rc)
 		return NULL;
 	}
 	if (nargs_com.type != arguments) {
-		err_print("Received invalid message\n");
+		err_print("Received invalid message %d\n", nargs_com.type);
 		*rc = -1;
 		return NULL;
 	}
@@ -372,7 +372,7 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 		if (rc < 0)
 			goto ret_1;
 		// Stop current task
-		if (send_ukvm_cmd("save_fpga", "/tmp/ukvm0.sock") < 0)
+		if (send_ukvm_cmd("stop", "/tmp/ukvm0.sock") < 0)
 			goto ret_1;
 		// start new task
 		ps_ukvm->pid = start_guest(NULL, ps_ukvm->binary, "--net=tap1",
@@ -382,7 +382,7 @@ static struct ukvm_ps *msg_from_primary(int socket, int *ret)
 		printf("Started ukvm guest with pid %d\n", ps_ukvm->pid);
 		*ret = 1;
 	} else if (node_com.type == resume) {
-		if (send_ukvm_cmd("load_fpga", "/tmp/ukvm0.sock") < 0)
+		if (send_ukvm_cmd("resume", "/tmp/ukvm0.sock") < 0)
 			goto ret_1;
 		*ret = 3;
 	} else if (node_com.type == mig_cmd) {

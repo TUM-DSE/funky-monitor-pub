@@ -938,9 +938,14 @@ static void scheduler_algorithm(struct node *nhead, struct task *thead,
 #if !defined(TIME_NCOM) && !defined(TIME_ALGO) && !defined (TIME_TASK)
 		printf("Task id %d with state %d, priority %hhu and bin at %s and args %s\n", tsk_tmp->id,tsk_tmp->state, tsk_tmp->priority, tsk_tmp->bin_path, tsk_tmp->bin_args ? tsk_tmp->bin_args : "");
 #endif
-		if (tsk_tmp->state == stopped && tsk_tmp->node->state == available) {
+		if (tsk_tmp->state == stopped) {
 			tsk_avail = tsk_tmp;
-			node_avail = tsk_tmp->node;
+			if (tsk_tmp->node->state == available) {
+				node_avail = tsk_tmp->node;
+			}
+#if defined(TIME_NCOM) || defined(TIME_ALGO) || defined (TIME_TASK)
+			break;
+#endif
 		}
 		if ((tsk_tmp->state == ready) && !tsk_avail)
 			tsk_avail = tsk_tmp;
@@ -957,8 +962,12 @@ static void scheduler_algorithm(struct node *nhead, struct task *thead,
 #endif
 		if ((node_tmp->state == low_prio) && !node_prior)
 			node_prior = node_tmp;
-		if ((node_tmp->state == available) && !node_avail)
+		if ((node_tmp->state == available) && !node_avail) {
 			node_avail = node_tmp;
+#if defined(TIME_NCOM) || defined(TIME_ALGO) || defined (TIME_TASK)
+			break;
+#endif
+		}
 		node_tmp = node_tmp->next;
 	}
 #if !defined(TIME_NCOM) && !defined(TIME_ALGO) && !defined (TIME_TASK)
@@ -1089,9 +1098,7 @@ int main()
 				struct node *node_tmp;
 				struct task *task_tmp;
 
-				printf("komple ws edw %d\n", __LINE__);
 				node_tmp = new_msg->nres.node;
-				printf("komple ws edw %d\n", __LINE__);
 				if (new_msg->nres.id == node_tmp->task->id) {
 					task_tmp = node_tmp->task;
 					node_tmp->state = available;
@@ -1106,15 +1113,12 @@ int main()
 				task_tmp->secs = end.tv_sec - task_tmp->tstart.tv_sec;
 				task_tmp->nsecs = end.tv_nsec - task_tmp->tstart.tv_nsec;
 #endif
-				printf("komple ws edw %d\n", __LINE__);
 
 				if (task_tmp->next != NULL)
 					task_tmp->next->prev = task_tmp->prev;
-				printf("komple ws edw %d\n", __LINE__);
 				if (task_tmp->prev != NULL) {
 					task_tmp->prev->next = task_tmp->next;
 				}
-				printf("komple ws edw %d\n", __LINE__);
 				printf("Task with id %d ", task_tmp->id);
 				if (new_msg->nres.res == 4)
 					printf("terminated successfully");
@@ -1179,6 +1183,7 @@ int main()
 #endif
 		if (!tsk_avail || !node_avail)
 			continue;
+		printf("task %d node %d\n", tsk_avail->id, node_avail->id);
 		/*
 		 * Deploy
 		 */
@@ -1187,13 +1192,19 @@ int main()
 			err_print("Out of memory\n");
 			goto fail_socs;
 		}
-		if (tsk_avail->priority == 0 && node_avail->state == low_prio)
+		if (tsk_avail->priority == 0 && node_avail->state == low_prio) {
 			msg_work->type = evict;
-		else if (tsk_avail->state == stopped)
+			msg_work->tsk = tsk_avail;
+		} else if (tsk_avail->state == stopped && node_avail == tsk_avail->node) {
 			msg_work->type = resume;
-		else
+			msg_work->tsk = tsk_avail;
+		} else if (tsk_avail->state == stopped && node_avail != tsk_avail->node) {
+			msg_work->type = migrate;
+			msg_work->node = node_avail;
+		} else {
 			msg_work->type = deploy;
-		msg_work->tsk = tsk_avail;
+			msg_work->tsk = tsk_avail;
+		}
 
 		rc = write(node_avail->ev_fd, &msg_work, sizeof(uint64_t));
 		if (rc < sizeof(uint64_t)) {
