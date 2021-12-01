@@ -151,6 +151,10 @@ int main(int argc, char **argv)
     int matched;
     char *mig_file = NULL;
 
+    // measure time
+    struct timespec t_start_ukvm, t_start_solo5;
+    clock_gettime(CLOCK_MONOTONIC, &t_start_ukvm);
+
     prog = basename(*argv);
     argc--;
     argv++;
@@ -238,6 +242,10 @@ int main(int argc, char **argv)
         err(1, "Error while setting memory protection");
 
     setup_modules(hv);
+
+    clock_gettime(CLOCK_MONOTONIC, &t_start_solo5);
+
+    printf("time elapsed before launching vCPU: %lf s\n", (double)(t_start_solo5.tv_sec - t_start_ukvm.tv_sec) + ((double)(t_start_solo5.tv_nsec - t_start_ukvm.tv_nsec) / 1000000000L) );
 
     return ukvm_hv_vcpu_loop(hv);
 }

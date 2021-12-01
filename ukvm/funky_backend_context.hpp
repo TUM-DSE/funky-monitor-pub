@@ -96,9 +96,19 @@ namespace funky_backend {
       /** 
        * receive a request by polling the cmd queue 
        */
-      funky_msg::request* read_request()
+      funky_msg::request* pop_request()
       {
         return request_q.pop();
+      }
+
+      funky_msg::request* read_request()
+      {
+        return request_q.read();
+      }
+
+      void update_readq()
+      {
+        request_q.update();
       }
 
       /**  
@@ -423,6 +433,20 @@ namespace funky_backend {
       /**
        * wait for the completion of enqueued tasks 
        */
+      void sync_fpga(void)
+      {
+        DEBUG_STREAM("sync all cmdq.");
+        std::cout << "MIG: sync all cmdq. \n";
+
+        for (auto queue : queues)
+        {
+          DEBUG_STREAM("sync queue[" << queue.first << "]...");
+          queue.second.finish();
+        }
+
+        sync_flag=true;
+      }
+
       void sync_fpga(int cmdq_id)
       {
         DEBUG_STREAM("sync cmdq (id: " << cmdq_id << ")");
@@ -434,6 +458,9 @@ namespace funky_backend {
         }
         queue_in_map->second.finish();
 
+        /* TODO: change here: if the guest creates multiple cmd queues, 
+         * the context has to manage the same number of sync flags. 
+         */
         sync_flag=true;
       }
 

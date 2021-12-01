@@ -14,6 +14,7 @@ extern "C" {
 #include<stdint.h>
 
 #include "ukvm.h"
+#include "funky_debug_c.h"
 
 /* multi-threading */
 struct fpga_thr_info
@@ -58,7 +59,8 @@ struct fpga_data_header {
 
 #define MSG_QUEUE_MAX_CAPACITY 8
 
-struct thr_msg* recv_msg_from_worker(void);
+// struct thr_msg* recv_msg_from_worker(void);
+int recv_msg_from_worker(struct thr_msg* msg);
 int send_msg_to_worker(struct thr_msg *msg);
 
 

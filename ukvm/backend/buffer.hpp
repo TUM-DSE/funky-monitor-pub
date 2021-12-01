@@ -139,12 +139,37 @@ namespace buffer {
         return head_elem;
       }
 
+      T* get_head_addr()
+      {
+        auto head_elem = base_elem + header->head;
+        return head_elem;
+      }
+
+      // move head ptr forward (only for Writer) to make the written data readable
+      bool move_head_forward()
+      {
+        header->head = (header->head+1) % header->capacity;
+        return true;
+      }
+
       // read data from tail (data copy is done by keader)
       T* pop_from_tail()
       {
         auto tail_elem = base_elem + header->tail;
         header->tail = (header->tail+1) % header->capacity;
         return tail_elem;
+      }
+
+      T* get_tail_addr()
+      {
+        auto tail_elem = base_elem + header->tail;
+        return tail_elem;
+      }
+
+      bool move_tail_forward()
+      {
+        header->tail = (header->tail+1) % header->capacity;
+        return true;
       }
 
       void* get_baseaddr()
@@ -163,19 +188,63 @@ namespace buffer {
 
   template <typename T>
   class Reader : public RingBuffer<T> {
+    private:
+      bool is_tail_updated = true;
     public:
       Reader(size_t cap) : RingBuffer<T>(cap) {}
       Reader(void* addr) : RingBuffer<T>(addr) {}
 
+      /* TODO: 
+       * If the buffer is being full, read data might be overwritten. 
+       * memcpy() is necessary before forwarding the tail.
+       *
+       * Or to avoid copying, pass a callback function as an argument and do the following steps: 
+       * 1. get a T pointer to tail
+       * 2. do callback(T *value) for the given pointer
+       * 3. move tail forward
+       */
       // If the buffer is empty, return NULL
       T* pop()
       {
         if(RingBuffer<T>::empty())
           return NULL;
 
-        auto head_addr = RingBuffer<T>::pop_from_tail();
-        return head_addr;
+        auto tail_elem = RingBuffer<T>::pop_from_tail();
+        return tail_elem;
       }
+
+      /* 
+       * read() does not move the tail pointer. 
+       * The caller of read() is responsible for calling update() after the operation is completed.
+       */ 
+      T* read()
+      {
+        if(RingBuffer<T>::empty())
+          return NULL;
+
+        if(is_tail_updated == false)
+        {
+          printf("Warning: call update().\n");
+          return NULL;
+        }
+
+        auto tail_elem = RingBuffer<T>::get_tail_addr();
+        is_tail_updated = false;
+        return tail_elem;
+      }
+
+      void update()
+      {
+        if(is_tail_updated == true)
+        {
+          printf("Warning: tail is up-to-date.\n");
+          return;
+        }
+
+        RingBuffer<T>::move_tail_forward();
+        is_tail_updated = true;
+      }
+
   };
 
   template <typename T>
@@ -190,8 +259,10 @@ namespace buffer {
         if(RingBuffer<T>::full())
           return false;
 
-        auto head_addr = RingBuffer<T>::push_to_head();
+        // auto head_addr = RingBuffer<T>::push_to_head();
+        auto head_addr = RingBuffer<T>::get_head_addr();
         std::memcpy(head_addr, &elem, sizeof(T));
+        RingBuffer<T>::move_head_forward();
         return true;
       }
   };

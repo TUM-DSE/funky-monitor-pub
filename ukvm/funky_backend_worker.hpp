@@ -239,6 +239,7 @@ namespace funky_backend {
 
       /* get the next request */
       retired_reqs++;
+      ctx->update_readq();
       req = ctx->read_request();
     }
 
@@ -292,6 +293,11 @@ namespace funky_backend {
         return m_fpga_context.get_sync_flag();
       }
 
+      void sync_fpga_by_worker()
+      {
+        m_fpga_context.sync_fpga();
+      }
+
       std::vector<uint8_t>& save_fpga()
       {
         return m_fpga_context.save_fpga_memory();
@@ -336,6 +342,18 @@ namespace funky_backend {
       struct thr_msg* recv_msg()
       {
         return msg_read_queue.pop();
+      }
+
+      template<typename Func> 
+      bool recv_msg_with_callback(Func callback)
+      {
+        auto recv_msg = msg_read_queue.read();
+        if(recv_msg == nullptr)
+          return false;
+
+        callback(recv_msg);
+        msg_read_queue.update();
+        return true;
       }
 
       /**  

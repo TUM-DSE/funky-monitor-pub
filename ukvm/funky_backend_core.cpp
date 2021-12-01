@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <vector>
 #include <thread>
+#include <mutex>
 
 /* Xocl backend context class to save temp data & communicate with xocl lib */
 std::unique_ptr<funky_backend::XoclContext> bk_context;
@@ -105,14 +106,23 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
      * The saved data is sent to the monitor and the monitor writes data into a file. 
      * 
      * */
-    auto req = worker.recv_msg();
-    while(req == nullptr) {
+    // auto req = worker.recv_msg();
+    enum ThrMsgType recv_msg_type;
+    bool req_flag = false;
+    auto cb = [&](struct thr_msg* recv_msg){ 
+      recv_msg_type = recv_msg->msg_type; 
+      return false;
+    };
+
+    while(!req_flag) {
       worker.handle_fpga_requests();
-      req = worker.recv_msg();
+      // req = worker.recv_msg();
+      req_flag = worker.recv_msg_with_callback(cb);
     }
 
     /* Handling messages from the other threads (monitor, vCPU) */
-    switch(req->msg_type) {
+    // switch(req->msg_type) {
+    switch(recv_msg_type) {
       case MSG_KILLWORKER:
       {
         std::cout << "MSG_KILLWORKER request has been received.\n";
@@ -127,14 +137,19 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
         break;
     }
 
-    // std::cout << "Worker: received SAVEFPGA request. \n";
+    DEBUG_STREAM("received SAVEFPGA request.");
 
     /* 
      * start VM (FPGA) migration 
      * */
     /* handle incoming FPGA requests until a sync point (e.g., just after clFinish()) */
-    while(!worker.check_sync_point())
-      worker.handle_fpga_requests();
+    /* if it does not reach to a sync point, the worker thread sync the FPGA by itself. 
+     *
+     * TODO: this is not allowed if pipelined kernels are enqueued. 
+     */
+    if(worker.check_sync_point() == false)
+      worker.sync_fpga_by_worker();
+      // worker.handle_fpga_requests();
 
     /* 
      * Write back OpenCL memory objects with CL_MEM_USE_HOST_PTR flag to guest memory 
@@ -148,12 +163,18 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
      * */
     worker.sync_fpga_memory();
 
-    /* send 'synced' msg to Monitor */
+    /* send 'sync' msg to Monitor */
     struct thr_msg sync_msg = {MSG_SYNCED, NULL, 0};
     worker.send_msg(sync_msg);
 
+    /* callback function for KILLWORKER msg */
+    auto cb_for_killworker = [](struct thr_msg* msg) {
+      if(msg->msg_type != MSG_KILLWORKER)
+        std::cout << "Warning: received a different req: " << msg->msg_type << "\n"; 
+    };
+
     if(worker.is_fpga_updated()) {
-      // std::cout << "UKVM worker: saving FPGA data... \n";
+      DEBUG_STREAM("worker: saving FPGA data...");
 
       /* send 'updated' msg to vCPU */
       auto p_thr_info = worker.get_thr_info();
@@ -169,32 +190,28 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
 
       /* wait for the completion of migration/eviction */
       // TODO: check when save_data is released. 
-      req = worker.recv_msg();
-      while(req == nullptr)
-        req = worker.recv_msg();
+      bool received = false; 
+      while(!received)
+        received = worker.recv_msg_with_callback(cb_for_killworker);
 
-      if(req->msg_type != MSG_KILLWORKER)
-        std::cout << "Warning: received a different req: " << req->msg_type << "\n"; 
-
-      // std::cout << "Worker: going to be killed...\n";
+      DEBUG_STREAM("worker: going to be killed...");
       struct thr_msg end_msg = {MSG_END, NULL, 0};
       worker.send_msg(end_msg);
     }
     else {
-      // std::cout << "UKVM worker: there's no data to be saved on FPGA. \n";
+      DEBUG_STREAM("worker: there's no data to be saved on FPGA.");
       auto p_thr_info = worker.get_thr_info();
       struct thr_msg init_msg = {MSG_INIT, p_thr_info, sizeof(struct fpga_thr_info)};
       worker.send_msg(init_msg);
-      req = worker.recv_msg();
-      while(req == nullptr)
-        req = worker.recv_msg();
 
-      if(req->msg_type != MSG_KILLWORKER)
-        std::cout << "Warning: received a different req: " << req->msg_type << "\n";
+      bool received = false;
+      while(!received)
+        received = worker.recv_msg_with_callback(cb_for_killworker);
 
-      // std::cout << "Worker: going to be killed...\n";
       struct thr_msg end_msg = {MSG_END, NULL, 0};
       worker.send_msg(end_msg);
+
+      DEBUG_STREAM("worker: being destroyed...");
     }
   };
 
@@ -206,40 +223,48 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
       );
 }
 
-// TODO: mutex is necessary?
-struct thr_msg *recv_msg_from_worker()
+std::mutex mtx_worker_msgq_read;
+int recv_msg_from_worker(struct thr_msg* msg)
 {
-  auto msg = msg_read_queue->pop();
-  while (msg == nullptr)
-    msg = msg_read_queue->pop();
+  std::lock_guard<std::mutex> guard(mtx_worker_msgq_read);
+  auto recv_msg = msg_read_queue->read();
+  while (recv_msg == nullptr)
+    recv_msg = msg_read_queue->read();
 
-  return msg;
+  std::memcpy(msg, recv_msg, sizeof(struct thr_msg));
+  msg_read_queue->update();
+  
+  // TODO: return 0 if failed
+  return 1;
 }
 
+std::mutex mtx_worker_msgq_write;
 int send_msg_to_worker(struct thr_msg *msg)
 {
+  std::lock_guard<std::mutex> guard(mtx_worker_msgq_write);
   auto ret = msg_write_queue->push(*msg);
   return (ret)? 1: 0;
 }
 
 void destroy_fpga_worker()
 {
-  std::cout << "UKVM: destroy a worker thread..." << std::endl;
+  DEBUG_STREAM("UKVM: destroy a worker thread...");
 
   /* let the worker thread kill itself */
   struct thr_msg destroy_req = {MSG_KILLWORKER, NULL, 0};
   send_msg_to_worker(&destroy_req);
 
   /* confirm if the worker thread has been killed before releasing msg queues. */
-  // FIXME: the forrowing condition always results in false while the msg_type looks correct... why???
-  // auto msg = recv_msg_from_worker();
-  recv_msg_from_worker();
-  // if(msg->msg_type != MSG_END)
-  //   std::cout << "Warning: received msg is different from the expectation: " << msg->msg_type << "\n"; 
+  struct thr_msg recv_msg;
+  recv_msg_from_worker(&recv_msg);
+  while(recv_msg.msg_type != MSG_END)
+  {
+    if(recv_msg.msg_type != MSG_INIT)
+      std::cout << "Warning: received " << recv_msg.msg_type << ". Read again...\n"; 
 
-  //   recv_msg = recv_msg_from_worker();
-  // }
-  std::cout << "UKVM: confirm the worker thread is going to be destroyed." << std::endl;
+    recv_msg_from_worker(&recv_msg);
+  }
+  std::cout << "UKVM: confirm the worker thread is going to be destroyed.\n";
 
   /* release the smart pointer */
   msg_read_queue.release();
