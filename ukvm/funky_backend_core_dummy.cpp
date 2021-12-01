@@ -45,9 +45,9 @@ int is_fpga_worker_alive()
 }
 
 // TODO: mutex is necessary?
-struct thr_msg *recv_msg_from_worker()
+int recv_msg_from_worker(struct thr_msg* msg)
 {
-  return NULL;
+  return 1;
 }
 
 int send_msg_to_worker(struct thr_msg *msg)
