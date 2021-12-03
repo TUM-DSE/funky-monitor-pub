@@ -24,6 +24,7 @@ namespace funky_backend {
 
   class XoclContext {
     public:
+      /* used for migration */
       struct memobj_header
       {
         int mem_id;
@@ -32,6 +33,12 @@ namespace funky_backend {
         cl_mem_object_type mem_type;
         cl_mem_flags mem_flags;
         bool onfpga_flag; //if true, data needs to be copied from src FPGA mem to dest FPGA mem
+      };
+
+      struct eventobj_header
+      {
+        int event_id;
+        cl_ulong profiling_info[5];
       };
 
     private:
@@ -44,18 +51,19 @@ namespace funky_backend {
       cl::Context context;
       std::unique_ptr<cl::Program> program;
       std::map<int, cl::CommandQueue> queues;
-      // cl::CommandQueue queue;
 
       // TODO: kernels that have been initialized once will be reused in the future? If not, we don't need to keep them here
       std::map<const char*, cl::Kernel> kernels;
 
+      // memory obj
       // TODO: consider cl::Pipe, cl::Image
       std::map<int, cl::Buffer> buffers;
       std::map<int, bool> buffer_onfpga_flags;
       std::map<int, ukvm_gpa_t> buffer_gpas;
 
-      // TODO: cl::Event
+      // event obj
       std::map<int, cl::Event> events;
+      std::map<int, struct eventobj_header> migrated_events;
 
       // for migration
       std::vector<uint8_t> mig_save_data;
@@ -392,17 +400,46 @@ namespace funky_backend {
         cl_int err;
 
         auto event_in_map = events.find(event_id);
-        if(event_in_map == events.end()) {
-          std::cout << "UKVM (ERROR): event " << event_id << " is not found. " << std::endl;
-          exit(1);
+        if(event_in_map != events.end()) {
+          DEBUG_STREAM("event[" << event_id << "] is found.");
+          OCL_CHECK(err, err = events[event_id].getProfilingInfo<uint64_t>(param_name, (uint64_t*) param_value));
+
+          return;
         }
 
-        DEBUG_STREAM("event[" << event_id << "] is found.");
+        /* if event is not found, search migrated events */
+        auto eheader_in_map = migrated_events.find(event_id);
+        if(eheader_in_map != migrated_events.end()) {
+          DEBUG_STREAM("event[" << event_id << "] is found in migrated events.");
+          int param_id;
+          switch(param_name)
+          {
+            case CL_PROFILING_COMMAND_QUEUED:
+              param_id = 0;
+              break;
+            case CL_PROFILING_COMMAND_SUBMIT:
+              param_id = 1;
+              break;
+            case CL_PROFILING_COMMAND_START:
+              param_id = 2;
+              break;
+            case CL_PROFILING_COMMAND_END:
+              param_id = 3;
+              break;
+            default:
+              std::cout << "UKVM (warning): unknown param_name." << std::endl;
+              param_id = 0;
+              break;
+          }
 
-        // TODO: the following reference to eventobj gets failed. Why??
-        // auto event = (cl::Event) event_in_map->second();
-        // OCL_CHECK(err, err = event.getProfilingInfo<uint64_t>(param_name, (uint64_t*) param_value));
-        OCL_CHECK(err, err = events[event_id].getProfilingInfo<uint64_t>(param_name, (uint64_t*) param_value));
+          std::memcpy((void*)param_value, 
+              (void*)&(migrated_events[event_id].profiling_info[param_id]), 
+              sizeof(cl_profiling_info));
+          return;
+        }
+
+        std::cout << "UKVM (ERROR): event " << event_id << " is not found. " << std::endl;
+        exit(1);
       }
 
       /**
@@ -507,32 +544,61 @@ namespace funky_backend {
 
       std::vector<uint8_t>& save_fpga_memory()
       {
+        size_t event_num;
+        std::vector<struct eventobj_header> eheaders;
         std::vector<struct memobj_header> headers;
         std::map<int, std::vector<uint8_t>> saved_obj;
         size_t total_size = 0;
 
-        /* Generate memory object headers */
+        /* read event objects (profiling info) */
+        /*
+         * FIXME: save migrated_events as well. 
+         * Otherwise, when second or more migration happens, 
+         * eventobj info saved by the previous migration is thrown away. 
+         */
+        event_num = events.size();
+        total_size += sizeof(event_num);
+        for(auto it : events)
+        {
+          auto id = it.first;
+          auto event = it.second;
+          struct eventobj_header eheader;
+          eheader.event_id = id;
+          event.getProfilingInfo<uint64_t>(CL_PROFILING_COMMAND_QUEUED,  &eheader.profiling_info[0]);
+          event.getProfilingInfo<uint64_t>(CL_PROFILING_COMMAND_SUBMIT,  &eheader.profiling_info[1]);
+          event.getProfilingInfo<uint64_t>(CL_PROFILING_COMMAND_START,   &eheader.profiling_info[2]);
+          event.getProfilingInfo<uint64_t>(CL_PROFILING_COMMAND_END,     &eheader.profiling_info[3]);
+          // event.getProfilingInfo<uint64_t>(CL_PROFILING_COMMAND_COMPLETE,&eheader.profiling_info[4]);
+
+          eheaders.emplace_back(eheader);
+          total_size += sizeof(struct eventobj_header);
+        }
+
+        /* read memory objects */
         for(auto it : buffers)
         {
           auto id = it.first;
 
           struct memobj_header header = {
-            id, buffer_gpas[id], 0, 0, 0, buffer_onfpga_flags[id]};
+            id, buffer_gpas[id], 0, 0, 0, buffer_onfpga_flags[id]
+          };
 
           auto buffer = it.second; 
           buffer.getInfo(CL_MEM_SIZE, &(header.mem_size));
           buffer.getInfo(CL_MEM_TYPE, &(header.mem_type));
           buffer.getInfo(CL_MEM_FLAGS, &(header.mem_flags));
-          // std::cout << "buffer[" << id << "]: " << std::endl
-          //   << "gpa: 0x" << std::hex << header.gpa << ", size: " << header.mem_size 
-          //   << ", type: " << header.mem_type << ", flag: " << header.mem_flags 
-          //   << ", onfpga: " << header.onfpga_flag << std::endl;
+          DEBUG_STREAM("buffer[" << id << "]: \n" 
+          << "gpa: 0x" << std::hex << header.gpa << ", size: " << header.mem_size 
+          << ", type: " << header.mem_type << ", flag: " << header.mem_flags 
+          << ", onfpga: " << header.onfpga_flag);
 
           headers.emplace_back(header);
           total_size += sizeof(struct memobj_header);
 
-          /* if CL_MEM_USE_HOST_PTR is valid, 
-           * the object is already written in guest memory */
+          /* 
+           * if CL_MEM_USE_HOST_PTR is valid, 
+           * the object is already written in guest memory 
+           */
           if(header.mem_flags & CL_MEM_USE_HOST_PTR)
             continue;
 
@@ -542,26 +608,37 @@ namespace funky_backend {
             auto data_ptr = saved_obj.find(id)->second.data();
 
             cl_int err;
-            // OCL_CHECK(err, err = queue.enqueueReadBuffer(buffer, CL_TRUE, 0, 
             OCL_CHECK(err, err = queues[0].enqueueReadBuffer(buffer, CL_TRUE, 0, 
                   header.mem_size, data_ptr, nullptr, nullptr));
             total_size += header.mem_size;
           }
         }
         
-        /* Wait for data transfers from FPGA (sync) */
-        // queue.finish();
+        /* sync FPGA */
         queues[0].finish();
 
-        /* Copy data into a single buffer */
+        /* save data into a single buffer */
         mig_save_data.resize(total_size);
         uint8_t* mig_data_ptr = mig_save_data.data();
 
+        /* save eventobj */
+        std::memcpy((void*)mig_data_ptr, (void*)&event_num, sizeof(event_num));
+        mig_data_ptr += sizeof(event_num);
+        for(auto eheader : eheaders)
+        {
+          /* copy header */
+          std::memcpy((void*)mig_data_ptr, (void*)&eheader, sizeof(struct eventobj_header));
+          mig_data_ptr += sizeof(struct eventobj_header);
+        }
+
+        /* save memobj */
         for(auto header : headers)
         {
+          /* copy header */
           std::memcpy((void*)mig_data_ptr, (void*)&header, sizeof(struct memobj_header));
           mig_data_ptr += sizeof(struct memobj_header);
 
+          /* copy data */
           // TODO: data copies here are redundant?
           auto obj = saved_obj.find(header.mem_id);
           if(obj != saved_obj.end()) {
@@ -571,8 +648,8 @@ namespace funky_backend {
           }
         }
 
-        // std::cout << "total file size: " << total_size << " Bytes. (num of buffer elements: " << mig_save_data.size() << ")" << std::endl; 
-
+        DEBUG_STREAM("saved file size: " << total_size << " Bytes.");
+        DEBUG_STREAM("event num: " << event_num << ", memobj num: " << mig_save_data.size()); 
         return mig_save_data;
       }
 
@@ -581,6 +658,23 @@ namespace funky_backend {
         auto current_ptr = (uint8_t *)load_data;
         auto end_ptr = (uint8_t *)load_data + load_data_size;
 
+        /* load eventobj */
+        size_t event_num;
+        std::memcpy((void*)&event_num, (void*)current_ptr, sizeof(size_t));
+        current_ptr += sizeof(size_t);
+        DEBUG_STREAM("event num: " << event_num); 
+        while(event_num > 0)
+        {
+          struct eventobj_header eh;
+          std::memcpy((void*)&eh, (void*)current_ptr, sizeof(struct eventobj_header));
+          current_ptr += sizeof(struct eventobj_header);
+
+          migrated_events.emplace(eh.event_id, eh);
+          DEBUG_STREAM("event (id: " << eh.event_id << "is loaded.");
+          event_num--;
+        }
+
+        /* load memobj */
         while(current_ptr < end_ptr)
         {
           auto h = (struct memobj_header*) current_ptr;
@@ -589,25 +683,23 @@ namespace funky_backend {
           void* host_ptr = UKVM_CHECKED_GPA_P(hv, h->gpa, h->mem_size);
           create_buffer(h->mem_id, h->mem_flags, h->mem_size, host_ptr, (void *)h->gpa);
 
+          /* write memobj back into FPGA memory */
           if(h->onfpga_flag) 
           {
             cl_int err;
+            /* load data from a host-side buffer in guest memory */
             if(h->mem_flags & CL_MEM_USE_HOST_PTR) {
-              /* Restore data from a cache in guest memory space */
-              // OCL_CHECK(err, err = queue.enqueueMigrateMemObjects({buffers[h->mem_id]}, 0));
               OCL_CHECK(err, err = queues[0].enqueueMigrateMemObjects({buffers[h->mem_id]}, 0));
             }
+            /* load data from a migration file */
             else {
-              /* Restore data from migration file */
-              // OCL_CHECK(err, err = queue.enqueueWriteBuffer(buffers[h->mem_id], 
               OCL_CHECK(err, err = queues[0].enqueueWriteBuffer(buffers[h->mem_id], 
                     CL_TRUE, 0, h->mem_size, current_ptr, nullptr, nullptr));
               current_ptr += h->mem_size;
             }
           }
 
-          /* Wait for data transfers from FPGA (sync) */
-          // queue.finish();
+          /* sync FPGA */
           queues[0].finish();
         }
 
