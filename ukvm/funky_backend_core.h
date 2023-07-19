@@ -16,6 +16,14 @@ extern "C" {
 #include "ukvm.h"
 #include "funky_debug_c.h"
 
+struct funky_metrics_collector {
+    char *endpoint;
+};
+
+void funky_metrics_push_fpga_usage_duration(struct funky_metrics_collector *collector, double duration_ms);
+void funky_metrics_push_reconfiguration(struct funky_metrics_collector *collector);
+struct funky_metrics_collector *funky_metrics_collector_init(char *endpoint);
+
 /* multi-threading */
 struct fpga_thr_info
 {
@@ -29,6 +37,10 @@ struct fpga_thr_info
 
   void* mig_data;
   size_t mig_size;
+
+  struct funky_metrics_collector *metrics_collector;
+
+  char *bitstream_identifier;
 };
 
 void create_fpga_worker(struct fpga_thr_info thr_info);
@@ -52,6 +64,16 @@ struct thr_msg {
   size_t size;
 };
 
+enum MetricsMsgType {
+    MSG_METRICS_PUSH
+};
+
+struct metrics_msg {
+    enum MetricsMsgType msg_type;
+    void* data;
+    size_t size;
+};
+
 struct fpga_data_header {
   unsigned int sb_fpgainit: 1; // status bit
   unsigned long data_size: 63;
@@ -66,7 +88,7 @@ int send_msg_to_worker(struct thr_msg *msg);
 
 /* FPGA resource allocation */
 int allocate_fpga(void* wr_queue_addr, void* rd_queue_addr);
-int reconfigure_fpga(void* bin, size_t bin_size);
+int reconfigure_fpga(void* bin, size_t bin_size, int* reconfigured);
 int release_fpga(void);
 
 /* Request handler */

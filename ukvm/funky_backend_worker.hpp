@@ -264,16 +264,20 @@ namespace funky_backend {
       {}
 
       /* Reconfigure FPGA */
-      void reconfigure_fpga()
+      double reconfigure_fpga()
       {
         void* bitstream = UKVM_CHECKED_GPA_P(m_thr_info.hv, m_thr_info.bs, m_thr_info.bs_len);
 
-        auto ret = m_fpga_context.reconfigure_fpga(bitstream, m_thr_info.bs_len);
+        double reconfiguration_time = 0;
+
+        auto ret = m_fpga_context.reconfigure_fpga(bitstream, m_thr_info.bs_len, &reconfiguration_time);
         if(ret != CL_SUCCESS)
         {
           std::cout << "UKVM: failed to program device. \n";
           exit(EXIT_FAILURE);
         }
+
+        return reconfiguration_time;
       }
 
       int handle_fpga_requests()

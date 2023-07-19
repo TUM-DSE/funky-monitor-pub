@@ -137,7 +137,7 @@ for module in "$@"; do
 done
 
 if [ "${ENABLE_FUNKY}" = "yes" ]; then
-  UKVM_LDLIBS="-L${XILINX_XRT}/lib -lOpenCL -lpthread -lrt -lstdc++" # for Funky backend
+  UKVM_LDLIBS="-L${XILINX_XRT}/lib -lOpenCL -lpthread -lrt -lstdc++ -lcurl" # for Funky backend
 
   FUNKY_CPP=${UKVM_CPP}  # for compiling Funky codes
   FUNKY_OBJS=

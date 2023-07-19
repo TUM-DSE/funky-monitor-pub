@@ -319,6 +319,25 @@ char *handle_load(char *cmdarg)
     return file;
 }
 
+char *handle_metrics_collector(char *cmdarg)
+{
+    size_t path_len = strlen(cmdarg);
+    char *metrics_collector_endpoint;
+    int rc;
+
+    metrics_collector_endpoint = malloc(path_len);
+    if (!metrics_collector_endpoint)
+        errx(1, "Out of memory");
+
+    rc = sscanf(cmdarg, "--metrics=%s", metrics_collector_endpoint);
+    if (rc != 1) {
+        errx(1, "Malformed argument to --metrics");
+    }
+    warn("I will send metrics to %s", metrics_collector_endpoint);
+
+    return metrics_collector_endpoint;
+}
+
 /*
  * Signal handler. For the time being it is just consumes the signal
  */

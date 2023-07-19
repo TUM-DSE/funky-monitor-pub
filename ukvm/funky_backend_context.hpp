@@ -16,12 +16,12 @@
 #include <algorithm>
 #include <vector>
 #include <map>
+#include <chrono>
 
 // TODO: user funky_hw_context to save/restore data on FPGA
 // #include "funky_hw_context.hpp"
 
 namespace funky_backend {
-
   class XoclContext {
     public:
       /* used for migration */
@@ -133,7 +133,7 @@ namespace funky_backend {
       /** 
        * reconfigure FPGA with a bitstream 
        */
-      int reconfigure_fpga(void* bin, size_t bin_size)
+      int reconfigure_fpga(void* bin, size_t bin_size, double *reconfigured)
       {
         cl_int err = CL_SUCCESS;
 
@@ -141,8 +141,29 @@ namespace funky_backend {
         auto devices = xcl::get_xil_devices();
         std::vector <cl::Device> p_devices = {devices[0]};
 
-        /* program bistream to the device (FPGA) */
+        auto start = std::chrono::high_resolution_clock::now();
+
+          /* program bistream to the device (FPGA) */
         program = std::make_unique<cl::Program>(context, p_devices, bins, nullptr, &err);
+
+        auto end = std::chrono::high_resolution_clock::now();
+
+        if (err != CL_SUCCESS) {
+          return err;
+        }
+
+        // TODO Improve reconfiguration detection
+        if (reconfigured != nullptr) {
+            auto reconfigure_time = std::chrono::duration<double, std::milli>(end - start).count();
+            // XRT does not expose whether the FPGA was reconfigured or not, so we use a heuristic
+            // to detect if the FPGA was reconfigured by comparing the reconfiguration time to a
+            // threshold of 100ms. This is not a robust solution, but it works for now.
+            if (reconfigure_time > 100) {
+                *reconfigured = reconfigure_time;
+            } else {
+                std::cout << "FPGA was reused (duration " << reconfigure_time << "ms)" << std::endl;
+            }
+        }
 
         return err;
       }

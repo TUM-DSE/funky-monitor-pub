@@ -35,6 +35,8 @@
 
 // static struct ukvm_fpgainfo fpgainfo;
 static char *fpganame;
+static char *metrics_collector_endpoint;
+static char *bitstream_identifier;
 // static int fpgafd;
 
 static void hypercall_fpgainfo(struct ukvm_hv *hv, ukvm_gpa_t gpa)
@@ -72,6 +74,11 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
     //       The request is always approved now because the scheduler doesn't exist.
 
 // #define DISABLE_FPGA_THR
+    struct funky_metrics_collector* metrics_collector = NULL;
+    if (metrics_collector_endpoint != NULL) {
+        metrics_collector = funky_metrics_collector_init(metrics_collector_endpoint);
+    }
+
 
 #ifdef DISABLE_FPGA_THR
     void* bitstream = UKVM_CHECKED_GPA_P(hv, fpga->bs, fpga->bs_len);
@@ -94,7 +101,9 @@ static void hypercall_fpgainit(struct ukvm_hv *hv, ukvm_gpa_t gpa)
       fpga->rd_queue, 
       fpga->rd_queue_len,
       NULL,
-      0
+      0,
+      metrics_collector,
+      bitstream_identifier
     };
 
     create_fpga_worker(thr_info);
@@ -136,11 +145,18 @@ static void hypercall_fpgareq(struct ukvm_hv *hv, ukvm_gpa_t gpa)
 
 static int handle_cmdarg(char *cmdarg)
 {
-    if (strncmp("--fpga=", cmdarg, 7))
-        return -1;
-    fpganame = cmdarg + 7;
+    if (!strncmp("--fpga=", cmdarg, 7)) {
+        fpganame = cmdarg + 7;
+        return 0;
+    } else if (!strncmp("--metrics=", cmdarg, 10)) {
+        metrics_collector_endpoint = cmdarg + 10;
+        return 0;
+    } else if (!strncmp("--bitstream=", cmdarg, 12)) {
+        bitstream_identifier = cmdarg + 12;
+        return 0;
+    }
 
-    return 0;
+    return -1;
 }
 
 static int setup(struct ukvm_hv *hv)
@@ -165,7 +181,9 @@ static int setup(struct ukvm_hv *hv)
 
 static char *usage(void)
 {
-    return "--fpga=FPGA (virt FPGA name exposed to the unikernel)";
+    return "--fpga=FPGA (virt FPGA name exposed to the unikernel)\n"
+           "[--metrics=ENDPOINT (metrics collector endpoint)]\n"
+           "[--bitstream=IDENTIFIER (bitstream identifier)]\n";
 }
 
 struct ukvm_module ukvm_module_fpga = {

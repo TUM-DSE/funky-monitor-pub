@@ -30,9 +30,165 @@
 #include <vector>
 #include <thread>
 #include <mutex>
+#include "timer.h"
 
 /* Xocl backend context class to save temp data & communicate with xocl lib */
 std::unique_ptr<funky_backend::XoclContext> bk_context;
+
+#include <curl/curl.h>
+#include <cstdio>
+
+#include <condition_variable>
+#include <deque>
+#include <iostream>
+
+long long get_time_ms() {
+    auto currentTime = std::chrono::system_clock::now();
+    auto duration = currentTime.time_since_epoch();
+    auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    return milliseconds;
+}
+
+void push_duration(struct funky_metrics_collector *collector, double duration_ms, long long timestamp_ms, char *bitstream_identifier) {
+    if (collector->endpoint == NULL) {
+        printf("No endpoint specified for metrics collector, skipping push_duration\n");
+        return;
+    }
+
+    printf("Pushing fpga usage duration: %f\n", duration_ms);
+
+    CURL *curl;
+    CURLcode res;
+
+    curl_global_init(CURL_GLOBAL_ALL);
+
+    curl = curl_easy_init();
+
+    if(curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, collector->endpoint);
+
+        // send duration as POST field
+        auto post_field = "duration_ms=" + std::to_string(duration_ms) + "&timestamp_ms=" + std::to_string(timestamp_ms) + "&bitstream_identifier=" + std::string(bitstream_identifier);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_field.c_str());
+
+        res = curl_easy_perform(curl);
+
+        if(res != CURLE_OK)
+            fprintf(stderr, "curl_easy_perform() failed: %s\n",
+                    curl_easy_strerror(res));
+
+        curl_easy_cleanup(curl);
+    } else {
+        printf("Failed to initialize curl\n");
+    }
+
+    curl_global_cleanup();
+
+    printf("Pushed fpga usage duration to %s\n", collector->endpoint);
+}
+
+void funky_metrics_push_fpga_usage_duration(struct funky_metrics_collector *collector, double duration_ms, long long timestamp_ms, char *bitstream_identifier) {
+    push_duration(collector, duration_ms, timestamp_ms, bitstream_identifier);
+}
+
+void push_reconfiguration_time(struct funky_metrics_collector *collector, long long timestamp_ms, double duration_ms, char *bitstream_identifier) {
+    if (collector == nullptr || collector->endpoint == nullptr) {
+        printf("No endpoint specified for metrics collector, skipping push_reconfiguration\n");
+        return;
+    }
+
+    printf("Pushing reconfiguration\n");
+
+    CURL *curl;
+    CURLcode res;
+
+    curl_global_init(CURL_GLOBAL_ALL);
+
+    curl = curl_easy_init();
+
+    if(curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, collector->endpoint);
+        auto fields = "reconfiguration_ms=" + std::to_string(duration_ms) + "&timestamp_ms=" + std::to_string(timestamp_ms) + "&bitstream_identifier=" + std::string(bitstream_identifier);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, fields.c_str());
+
+        res = curl_easy_perform(curl);
+
+        if(res != CURLE_OK)
+            fprintf(stderr, "curl_easy_perform() failed: %s\n",
+                    curl_easy_strerror(res));
+
+        curl_easy_cleanup(curl);
+    }
+
+    curl_global_cleanup();
+}
+
+void funky_metrics_push_reconfiguration_time(struct funky_metrics_collector *collector, long long timestamp_ms, double duration_ms, char *bitstream_identifier) {
+    push_reconfiguration_time(collector, timestamp_ms, duration_ms, bitstream_identifier);
+}
+
+struct funky_metrics_collector *funky_metrics_collector_init(char *endpoint) {
+    struct funky_metrics_collector *collector = (struct funky_metrics_collector *) malloc(sizeof(struct funky_metrics_collector));
+    collector->endpoint = endpoint;
+
+    return collector;
+}
+
+struct Request {
+    funky_metrics_collector *collector;
+    long long timestamp_ms;
+    double duration_ms;
+    double reconfiguration_ms;
+    char *bitstream_identifier;
+};
+
+std::deque<Request> requestQueue;
+std::mutex mtx;
+std::condition_variable cv;
+bool quit = false;
+
+void metricsDispatcherThread() {
+    while (true) {
+        Request request;
+
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            cv.wait(lock, []{ return quit || !requestQueue.empty(); });
+
+            if (quit && requestQueue.empty())
+                return;
+
+            request = requestQueue.front();
+            requestQueue.pop_front();
+        }
+
+        printf("Processing metrics dispatcher request\n");
+
+        // Process the request
+        if (request.reconfiguration_ms > 0) {
+            funky_metrics_push_reconfiguration_time(request.collector, request.timestamp_ms, request.reconfiguration_ms, request.bitstream_identifier);
+        } else {
+            funky_metrics_push_fpga_usage_duration(request.collector, request.duration_ms, request.timestamp_ms, request.bitstream_identifier);
+        }
+    }
+}
+
+
+auto metrics_dispatcher_thr = std::thread (metricsDispatcherThread);
+
+void add_dispatcher_request(Request request) {
+    std::lock_guard<std::mutex> lock(mtx);
+    requestQueue.push_back(request);
+    cv.notify_one();
+}
+
+void finish_dispatcher() {
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        quit = true;
+    }
+    cv.notify_one();
+}
 
 int allocate_fpga(void* wr_queue_addr, void* rd_queue_addr) {
   if(bk_context != nullptr) {
@@ -62,9 +218,9 @@ int save_bitstream(uint64_t addr, size_t size)
 }
 
 
-int reconfigure_fpga(void* bin, size_t bin_size)
+int reconfigure_fpga(void* bin, size_t bin_size, double *reconfigured)
 {
-  return bk_context->reconfigure_fpga(bin, bin_size);
+  return bk_context->reconfigure_fpga(bin, bin_size, reconfigured);
 }
 
 
@@ -88,10 +244,24 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
 
   auto fpga_worker_thread = [](struct fpga_thr_info thr_info, void* rq_addr, void* wq_addr)
   {
+    // create span and start measuring fpga workload duration
+    cPerfTimer *timer = new cPerfTimer();
+    timer->start();
+
     funky_backend::Worker worker(thr_info, rq_addr, wq_addr);
-    
+
     /* reconfigure FPGA & load FPGA memory from migration file (if mig_file exists) */
-    worker.reconfigure_fpga();
+    double reconfigured = worker.reconfigure_fpga();
+    if (reconfigured > 0) {
+      add_dispatcher_request({
+        .collector = thr_info.metrics_collector,
+        .timestamp_ms = get_time_ms(),
+        .duration_ms = 0,
+        .reconfiguration_ms = reconfigured,
+        .bitstream_identifier = thr_info.bitstream_identifier
+      });
+    }
+
     worker.load_fpga();
 
     /* inform another thread that Worker has been initialized */
@@ -120,14 +290,31 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
       req_flag = worker.recv_msg_with_callback(cb);
     }
 
+    // Record one duration for all the handled requests (like a session)
+    timer->stop();
+    add_dispatcher_request({
+        .collector = thr_info.metrics_collector,
+        .timestamp_ms = get_time_ms(),
+        .duration_ms = timer->get_ms(),
+        .reconfiguration_ms = 0,
+        .bitstream_identifier = thr_info.bitstream_identifier
+    });
+
     /* Handling messages from the other threads (monitor, vCPU) */
     // switch(req->msg_type) {
     switch(recv_msg_type) {
       case MSG_KILLWORKER:
       {
+        // Wait for outstanding requests to complete here
+        finish_dispatcher();
+        printf("Waiting for metrics dispatcher thread to finish...\n");
+        metrics_dispatcher_thr.join();
+
         std::cout << "MSG_KILLWORKER request has been received.\n";
         struct thr_msg end_msg = {MSG_END, NULL, 0};
+
         worker.send_msg(end_msg);
+
         return; // kill the thread by itself
       }
       case MSG_SAVEFPGA:
@@ -210,8 +397,7 @@ void create_fpga_worker(struct fpga_thr_info thr_info)
 
       struct thr_msg end_msg = {MSG_END, NULL, 0};
       worker.send_msg(end_msg);
-
-      DEBUG_STREAM("worker: being destroyed...");
+        DEBUG_STREAM("worker: being destroyed...");
     }
   };
 

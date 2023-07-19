@@ -17,7 +17,7 @@ int save_bitstream(uint64_t addr, size_t size)
 }
 
 
-int reconfigure_fpga(void* bin, size_t bin_size)
+int reconfigure_fpga(void* bin, size_t bin_size, int *reconfigured)
 {
   return 0;
 }

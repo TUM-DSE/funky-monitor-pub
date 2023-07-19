@@ -257,6 +257,12 @@ void handle_mon(char *cmdarg);
  */
 char *handle_load(char *cmdarg);
 
+/**
+ * Handle the metrics options. We will send metrics to the metrics collector
+ * pointed out in the command.
+ */
+char *handle_metrics_collector(char *cmdarg);
+
 /*
  * Set signal mask for IPI signals between monitor and vm thread
  */
