@@ -245,7 +245,7 @@ int main(int argc, char **argv)
 
     clock_gettime(CLOCK_MONOTONIC, &t_start_solo5);
 
-    printf("time elapsed before launching vCPU: %lf s\n", (double)(t_start_solo5.tv_sec - t_start_ukvm.tv_sec) + ((double)(t_start_solo5.tv_nsec - t_start_ukvm.tv_nsec) / 1000000000L) );
+    printf("time elapsed before launching vCPU: %.9lf s\n", (double)(t_start_solo5.tv_sec - t_start_ukvm.tv_sec) + ((double)(t_start_solo5.tv_nsec - t_start_ukvm.tv_nsec) / 1000000000L) );
 
     return ukvm_hv_vcpu_loop(hv);
 }
